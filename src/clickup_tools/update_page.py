@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 import json
 import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -37,6 +39,27 @@ _URL_PATTERNS = [
     re.compile(r"app\.clickup\.com/([^/]+)/v/dc/([^/?#]+)/([^/?#]+)"),
     re.compile(r"app\.clickup\.com/([^/]+)/docs/([^/?#]+)/([^/?#]+)"),
 ]
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((<[^>\n]+>|[^)\s\n]+)([^)\n]*)\)")
+_URL_RE = re.compile(r"https?://[^\s<>\]]+")
+_TRAILING_URL_PUNCTUATION = ".,;:"
+
+
+@dataclass
+class PreparedContent:
+    """Markdown content after ClickUp-oriented preprocessing."""
+
+    content: str
+    local_media_refs: list[str] = field(default_factory=list)
+    normalized_links: int = 0
+
+
+@dataclass
+class LinkContext:
+    """Caches metadata lookups while linkifying one document."""
+
+    api_token: str
+    clickup_titles: dict[str, str] = field(default_factory=dict)
+    figma_oembed: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def parse_page_url(url: str) -> tuple[str, str, str]:
@@ -97,6 +120,31 @@ def update_page(
     return json.loads(body)
 
 
+def get_page(
+    workspace_id: str,
+    doc_id: str,
+    page_id: str,
+    api_token: str,
+) -> dict[str, Any]:
+    """Fetch a ClickUp Doc page."""
+    query = urllib.parse.urlencode({"content_format": "text/plain"})
+    url = (
+        f"https://api.clickup.com/api/v3/workspaces/{workspace_id}"
+        f"/docs/{doc_id}/pages/{page_id}?{query}"
+    )
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": api_token,
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.loads(response.read())
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the command-line parser."""
     parser = argparse.ArgumentParser(
@@ -110,6 +158,8 @@ examples:
   clickup-update-page --workspace-id 123 --doc-id abc --page-id xyz notes.md
   clickup-update-page <url> notes.md --append
   clickup-update-page <url> notes.md --no-open
+  clickup-update-page notes.md --no-rich-links
+  clickup-update-page notes.md --allow-local-media
 
 metadata:
   When no URL or IDs are provided, the destination is read from front matter:
@@ -153,6 +203,16 @@ authentication:
         "--no-open",
         action="store_true",
         help="Do not open the page in a browser after a successful update",
+    )
+    parser.add_argument(
+        "--no-rich-links",
+        action="store_true",
+        help="Do not rewrite bare ClickUp/Figma URLs into Markdown links/previews",
+    )
+    parser.add_argument(
+        "--allow-local-media",
+        action="store_true",
+        help="Update even when Markdown contains local media paths that ClickUp cannot render",
     )
     return parser
 
@@ -244,16 +304,7 @@ def read_clickup_page_from_metadata(path: str) -> tuple[str, str, str]:
 
 def get_api_token() -> str:
     """Read the ClickUp API token from the environment or a local .env file."""
-    token = os.environ.get("CLICKUP_API_TOKEN", "").strip()
-    if token:
-        return token
-
-    for env_path in get_env_file_candidates():
-        token = read_api_token_from_env_file(env_path)
-        if token:
-            return token
-
-    return ""
+    return get_env_value("CLICKUP_API_TOKEN")
 
 
 def get_env_file_candidates() -> list[Path]:
@@ -271,6 +322,25 @@ def get_env_file_candidates() -> list[Path]:
 
 def read_api_token_from_env_file(path: Path) -> str:
     """Read CLICKUP_API_TOKEN from a dotenv-style file."""
+    return read_value_from_env_file(path, "CLICKUP_API_TOKEN")
+
+
+def get_env_value(name: str) -> str:
+    """Read a value from the environment or a local .env file."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+
+    for env_path in get_env_file_candidates():
+        value = read_value_from_env_file(env_path, name)
+        if value:
+            return value
+
+    return ""
+
+
+def read_value_from_env_file(path: Path, name: str) -> str:
+    """Read one variable from a dotenv-style file."""
     if not path.exists():
         return ""
 
@@ -288,10 +358,279 @@ def read_api_token_from_env_file(path: Path) -> str:
             stripped = stripped.removeprefix("export ").strip()
 
         key, separator, value = stripped.partition("=")
-        if separator and key.strip() == "CLICKUP_API_TOKEN":
+        if separator and key.strip() == name:
             return clean_metadata_value(value)
 
     return ""
+
+
+def prepare_markdown_content(
+    markdown_path: Path,
+    api_token: str,
+    *,
+    rich_links: bool = True,
+) -> PreparedContent:
+    """Read Markdown and prepare it for the ClickUp Docs API."""
+    raw_content = read_markdown(str(markdown_path))
+    _metadata, content = parse_front_matter(raw_content)
+    prepared = PreparedContent(content=content)
+    prepared.local_media_refs = find_local_media_references(
+        prepared.content,
+        markdown_path.parent,
+    )
+
+    if rich_links:
+        linkified, normalized_count = linkify_bare_urls(
+            prepared.content,
+            LinkContext(api_token=api_token),
+        )
+        prepared.content = linkified
+        prepared.normalized_links = normalized_count
+
+    return prepared
+
+
+def find_local_media_references(
+    content: str,
+    markdown_dir: Path,
+) -> list[str]:
+    """Find local Markdown media references ClickUp cannot render from API uploads."""
+    refs: list[str] = []
+    for match in _MARKDOWN_IMAGE_RE.finditer(content):
+        raw_target = normalize_markdown_url(match.group(2))
+
+        if not is_local_asset_reference(raw_target):
+            continue
+
+        asset_path = resolve_asset_path(raw_target, markdown_dir)
+        if not asset_path.exists() or not asset_path.is_file():
+            refs.append(f"{raw_target} (file not found)")
+        else:
+            refs.append(str(asset_path))
+
+    return refs
+
+
+def normalize_markdown_url(raw_url: str) -> str:
+    """Strip Markdown angle brackets from a URL/path."""
+    value = raw_url.strip()
+    if value.startswith("<") and value.endswith(">"):
+        return value[1:-1].strip()
+    return value
+
+
+def is_local_asset_reference(target: str) -> bool:
+    """Return whether a Markdown target is a local file reference."""
+    if not target or target.startswith("#"):
+        return False
+
+    parsed = urllib.parse.urlparse(target)
+    return parsed.scheme == ""
+
+
+def resolve_asset_path(target: str, markdown_dir: Path) -> Path:
+    """Resolve a Markdown local asset path relative to its document."""
+    path = Path(urllib.parse.unquote(target)).expanduser()
+    if path.is_absolute():
+        return path
+    return markdown_dir / path
+
+
+def linkify_bare_urls(content: str, context: LinkContext) -> tuple[str, int]:
+    """Convert bare ClickUp/Figma URLs into Markdown links or previews."""
+    normalized_count = 0
+    in_fence = False
+    output: list[str] = []
+
+    for line in content.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            output.append(line)
+            continue
+
+        if in_fence:
+            output.append(line)
+            continue
+
+        line_only_url = get_single_bare_url(line)
+
+        def replace(match: re.Match[str]) -> str:
+            nonlocal normalized_count
+            if is_url_already_linked(line, match):
+                return match.group(0)
+
+            url, trailing = split_trailing_url_punctuation(match.group(0))
+            replacement = format_special_url(url, context, line_only_url == url)
+            if replacement == url:
+                return match.group(0)
+
+            normalized_count += 1
+            return replacement + trailing
+
+        output.append(_URL_RE.sub(replace, line))
+
+    return "".join(output), normalized_count
+
+
+def get_single_bare_url(line: str) -> str | None:
+    """Return the URL when a line consists of only one bare URL."""
+    stripped = line.strip()
+    matches = list(_URL_RE.finditer(stripped))
+    if len(matches) != 1:
+        return None
+
+    url, trailing = split_trailing_url_punctuation(matches[0].group(0))
+    if trailing:
+        return None
+    if matches[0].start() == 0 and matches[0].end() == len(stripped):
+        return url
+    return None
+
+
+def is_url_already_linked(line: str, match: re.Match[str]) -> bool:
+    """Avoid rewriting URLs already inside Markdown links or inline code."""
+    start = match.start()
+    prefix = line[:start]
+
+    if prefix.endswith("](") or prefix.endswith("](<") or prefix.endswith("<"):
+        return True
+
+    return prefix.count("`") % 2 == 1
+
+
+def split_trailing_url_punctuation(raw_url: str) -> tuple[str, str]:
+    """Separate punctuation that belongs to the sentence, not the URL."""
+    url = raw_url
+    trailing = ""
+
+    while url and url[-1] in _TRAILING_URL_PUNCTUATION:
+        trailing = url[-1] + trailing
+        url = url[:-1]
+
+    while url.endswith(")") and url.count("(") < url.count(")"):
+        trailing = ")" + trailing
+        url = url[:-1]
+
+    return url, trailing
+
+
+def format_special_url(url: str, context: LinkContext, line_only: bool = False) -> str:
+    """Format a URL that ClickUp should receive as a richer Markdown block."""
+    hostname = urllib.parse.urlparse(url).hostname or ""
+    if hostname.endswith("clickup.com"):
+        return markdown_link(get_clickup_link_label(url, context), url)
+
+    if hostname.endswith("figma.com"):
+        return format_figma_url(url, context, line_only=line_only)
+
+    return url
+
+
+def get_clickup_link_label(url: str, context: LinkContext) -> str:
+    """Resolve a ClickUp Doc URL to its page name when possible."""
+    if url in context.clickup_titles:
+        return context.clickup_titles[url]
+
+    label = "ClickUp page"
+    try:
+        workspace_id, doc_id, page_id = parse_page_url(url)
+        page = get_page(workspace_id, doc_id, page_id, context.api_token)
+        label = extract_page_name(page) or label
+    except Exception:
+        pass
+
+    context.clickup_titles[url] = label
+    return label
+
+
+def extract_page_name(page: dict[str, Any]) -> str:
+    """Extract a page name from likely ClickUp response shapes."""
+    for key in ("name", "title"):
+        value = page.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    for container_key in ("page", "data"):
+        container = page.get(container_key)
+        if isinstance(container, dict):
+            name = extract_page_name(container)
+            if name:
+                return name
+
+    return ""
+
+
+def format_figma_url(url: str, context: LinkContext, *, line_only: bool = False) -> str:
+    """Create a readable Figma link, with a linked thumbnail when available."""
+    metadata = get_figma_oembed(url, context)
+    title = metadata.get("title") if metadata else ""
+    label = str(title).strip() or infer_figma_label(url)
+    thumbnail_url = str(metadata.get("thumbnail_url", "")).strip() if metadata else ""
+
+    if line_only and thumbnail_url:
+        image = markdown_image(f"Figma preview: {label}", thumbnail_url)
+        return f"{markdown_link_raw_label(image, url)}\n{markdown_link(label, url)}"
+
+    return markdown_link(label, url)
+
+
+def get_figma_oembed(url: str, context: LinkContext) -> dict[str, Any]:
+    """Fetch Figma oEmbed metadata when available."""
+    if url in context.figma_oembed:
+        return context.figma_oembed[url]
+
+    metadata: dict[str, Any] = {}
+    query = urllib.parse.urlencode({"url": url, "maxwidth": "960", "maxheight": "540"})
+    request = urllib.request.Request(
+        f"https://api.figma.com/v1/oembed?{query}",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = response.read()
+        loaded = json.loads(body)
+        if isinstance(loaded, dict):
+            metadata = loaded
+    except Exception:
+        metadata = {}
+
+    context.figma_oembed[url] = metadata
+    return metadata
+
+
+def infer_figma_label(url: str) -> str:
+    """Infer a compact Figma link label from the URL path."""
+    path = urllib.parse.urlparse(url).path.lower()
+    if "/proto/" in path:
+        return "Figma prototype"
+    if "/design/" in path:
+        return "Figma design"
+    if "/figjam/" in path:
+        return "FigJam board"
+    return "Figma"
+
+
+def markdown_link(label: str, url: str) -> str:
+    """Build a Markdown link with URL angle brackets for query-heavy URLs."""
+    return f"[{escape_markdown_label(label)}](<{url}>)"
+
+
+def markdown_link_raw_label(label: str, url: str) -> str:
+    """Build a Markdown link whose label already contains Markdown."""
+    return f"[{label}](<{url}>)"
+
+
+def markdown_image(alt_text: str, url: str) -> str:
+    """Build a Markdown image."""
+    return f"![{escape_markdown_label(alt_text)}](<{url}>)"
+
+
+def escape_markdown_label(label: str) -> str:
+    """Escape square brackets in a Markdown label."""
+    return label.replace("[", "\\[").replace("]", "\\]")
 
 
 def read_markdown(path: str, strip_metadata: bool = False) -> str:
@@ -332,13 +671,29 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     markdown_path = Path(markdown_file)
     try:
-        content = read_markdown(markdown_file, strip_metadata=True)
+        prepared = prepare_markdown_content(
+            markdown_path,
+            api_token,
+            rich_links=not args.no_rich_links,
+        )
     except FileNotFoundError as exc:
         err(str(exc))
         return 1
 
+    content = prepared.content
+
     info(f"File   : {markdown_path.resolve()} ({len(content):,} chars)")
     info(f"Target : workspace={workspace_id}  doc={doc_id}  page={page_id}")
+    info(f"Media  : local_refs={len(prepared.local_media_refs)}")
+    for local_ref in prepared.local_media_refs:
+        info(f"Local  : {local_ref}")
+    if not args.no_rich_links:
+        info(f"Links  : normalized={prepared.normalized_links}")
+
+    if prepared.local_media_refs and not args.allow_local_media:
+        err("Local media references cannot be rendered by ClickUp Docs API uploads.")
+        err("Replace them with public/hosted URLs, remove them, or rerun with --allow-local-media.")
+        return 1
 
     edit_mode = get_edit_mode(args)
     info(f"Mode   : {edit_mode}")
