@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +18,8 @@ from clickup_tools.update_page import (  # noqa: E402
     build_page_url,
     find_local_media_references,
     get_edit_mode,
+    get_env_file_candidates,
+    get_env_value,
     linkify_bare_urls,
     parse_front_matter,
     parse_page_url,
@@ -107,6 +111,37 @@ class ClickUpUpdatePageTests(unittest.TestCase):
     def test_read_api_token_from_env_file(self) -> None:
         fixture = ROOT / "tests" / "fixtures" / "example.env"
         self.assertEqual(read_api_token_from_env_file(fixture), "pk_test_token")
+
+    def test_explicit_env_file_is_checked_before_default_env_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            explicit_env = Path(tmp) / "clickup.env"
+            explicit_env.write_text("CLICKUP_API_TOKEN=pk_explicit\n", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {"CLICKUP_TOOLS_ENV_FILE": str(explicit_env)},
+                clear=True,
+            ):
+                candidates = get_env_file_candidates()
+
+        self.assertEqual(candidates[0].resolve(), explicit_env.resolve())
+
+    def test_get_env_value_reads_api_token_from_explicit_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            explicit_env = Path(tmp) / "clickup.env"
+            explicit_env.write_text(
+                "CLICKUP_API_TOKEN=pk_explicit\n"
+                "CLICKUP_TEAM_ID=1234567890\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"CLICKUP_TOOLS_ENV_FILE": str(explicit_env)},
+                clear=True,
+            ):
+                self.assertEqual(get_env_value("CLICKUP_API_TOKEN"), "pk_explicit")
+                self.assertEqual(get_env_value("CLICKUP_TEAM_ID"), "1234567890")
 
     def test_find_local_media_references(self) -> None:
         fixture_dir = ROOT / "tests" / "fixtures"

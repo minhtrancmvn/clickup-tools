@@ -2,6 +2,114 @@
 
 Small command-line utilities for ClickUp workflows.
 
+## Install
+
+Create a local virtual environment and install the package in editable mode:
+
+```sh
+cd "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools"
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -e .
+```
+
+Add your ClickUp credentials to `.env`:
+
+```sh
+CLICKUP_API_TOKEN=pk_your_personal_api_token
+CLICKUP_TEAM_ID=your_team_id
+```
+
+After installation, these CLI commands are available from the virtual
+environment:
+
+```sh
+clickup-update-page --help
+clickup-update-task --help
+clickup-mcp-server --help
+```
+
+You can also run the local wrapper scripts directly from this repo:
+
+```sh
+./clickup-update-page.py --help
+./clickup-update-task.py --help
+```
+
+## MCP Setup
+
+The MCP server exposes both tools:
+
+- `update_clickup_page`
+- `update_clickup_task`
+
+### VS Code / GitHub Copilot
+
+For VS Code with GitHub Copilot, add this to `.vscode/mcp.json` in the workspace
+where you want Copilot to use the tools:
+
+```json
+{
+  "servers": {
+    "clickup-tools": {
+      "type": "stdio",
+      "command": "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.venv/bin/clickup-mcp-server",
+      "envFile": "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.env"
+    }
+  }
+}
+```
+
+If this repo is the same workspace where `.vscode/mcp.json` lives, you can use
+workspace-relative paths instead:
+
+```json
+{
+  "servers": {
+    "clickup-tools": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/bin/clickup-mcp-server",
+      "envFile": "${workspaceFolder}/.env"
+    }
+  }
+}
+```
+
+In VS Code, start the server from the MCP controls or run `MCP: List Servers`
+from the command palette and select `clickup-tools`. In Copilot Chat, switch to
+Agent mode and enable the `clickup-tools` tools when needed.
+
+### Codex CLI
+
+Codex manages MCP servers with `codex mcp`. Codex does not use VS Code's
+`envFile` field, so point the ClickUp MCP server at this repo's `.env` file
+with `--env-file`:
+
+```sh
+codex mcp add clickup-tools -- \
+  "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.venv/bin/clickup-mcp-server" \
+  --env-file "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.env"
+codex mcp list
+codex mcp get clickup-tools
+```
+
+If you need to replace an existing server config:
+
+```sh
+codex mcp remove clickup-tools
+codex mcp add clickup-tools -- \
+  "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.venv/bin/clickup-mcp-server" \
+  --env-file "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.env"
+```
+
+When asking Codex to use these tools, pass absolute Markdown file paths to
+`update_clickup_page` or `update_clickup_task`. For example:
+
+```text
+Use update_clickup_task with file_path="/absolute/path/to/spec.md".
+```
+
 ## Tools
 
 ### `clickup-update-page`
@@ -9,8 +117,6 @@ Small command-line utilities for ClickUp workflows.
 Updates a ClickUp Doc page from a Markdown file using the ClickUp Docs API.
 
 ```sh
-export CLICKUP_API_TOKEN=pk_...
-
 ./clickup-update-page.py notes.md
 ./clickup-update-page.py 'https://app.clickup.com/123/v/dc/doc-id/page-id' notes.md
 ./clickup-update-page.py --workspace-id 123 --doc-id doc-id --page-id page-id notes.md
@@ -46,9 +152,6 @@ Updates a ClickUp task description from a Markdown file using the ClickUp Tasks
 API. The task description is replaced with the Markdown body.
 
 ```sh
-export CLICKUP_API_TOKEN=pk_...
-export CLICKUP_TEAM_ID=your_team_id
-
 ./clickup-update-task.py task.md
 ./clickup-update-task.py --task-id OOLE-523 task.md
 ./clickup-update-task.py --task-id OOLE-523 --team-id your_team_id task.md
@@ -82,11 +185,6 @@ Remote URLs and anchors are left unchanged. Existing task attachments are not
 deleted or reused, so rerunning the task updater can create duplicate
 attachments in ClickUp.
 
-The MCP server exposes both tools:
-
-- `update_clickup_page`
-- `update_clickup_task`
-
 ## Markdown Preparation
 
 Before uploading, the tool prepares the Markdown for ClickUp:
@@ -104,8 +202,8 @@ hosted media URLs in Markdown, or add media manually in the ClickUp UI after
 the text upload. Use `--allow-local-media` only when you intentionally want to
 upload Markdown that still contains local media paths.
 
-For local development, the script also reads `CLICKUP_API_TOKEN` from a `.env`
-file in this repo:
+For local development, the scripts read `CLICKUP_API_TOKEN` and
+`CLICKUP_TEAM_ID` from a `.env` file in this repo:
 
 ```sh
 CLICKUP_API_TOKEN=pk_your_personal_api_token
@@ -131,7 +229,7 @@ Run the test suite:
 python3 -m unittest
 ```
 
-Install locally in editable mode if you want the `clickup-update-page` command on your PATH:
+Install locally in editable mode if you want the console commands on your PATH:
 
 ```sh
 python3 -m pip install -e .

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import argparse
 import io
+import os
+from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
+from typing import Sequence
 
 from mcp.server.fastmcp import FastMCP
 
+from .update_page import ENV_FILE_ENV_VAR
 from .update_page import run as run_page
 from .update_task import run as run_task
 
@@ -110,8 +115,26 @@ def format_tool_result(exit_code: int, stdout: str, stderr: str) -> str:
         return f"Error (exit code {exit_code}).\n{combined}"
 
 
-def run_server() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Create the MCP server command-line parser."""
+    parser = argparse.ArgumentParser(
+        prog="clickup-mcp-server",
+        description="Run the ClickUp Tools MCP server over stdio.",
+    )
+    parser.add_argument(
+        "--env-file",
+        metavar="PATH",
+        help="Dotenv file containing CLICKUP_API_TOKEN and CLICKUP_TEAM_ID.",
+    )
+    return parser
+
+
+def run_server(argv: Sequence[str] | None = None) -> None:
     """Entry point for the clickup-mcp-server command."""
+    args = build_parser().parse_args(argv)
+    if args.env_file:
+        os.environ[ENV_FILE_ENV_VAR] = str(Path(args.env_file).expanduser())
+
     mcp.run()
 
 

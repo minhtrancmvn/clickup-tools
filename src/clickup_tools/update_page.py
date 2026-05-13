@@ -39,6 +39,7 @@ _URL_PATTERNS = [
     re.compile(r"app\.clickup\.com/([^/]+)/v/dc/([^/?#]+)/([^/?#]+)"),
     re.compile(r"app\.clickup\.com/([^/]+)/docs/([^/?#]+)/([^/?#]+)"),
 ]
+ENV_FILE_ENV_VAR = "CLICKUP_TOOLS_ENV_FILE"
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((<[^>\n]+>|[^)\s\n]+)([^)\n]*)\)")
 _URL_RE = re.compile(r"https?://[^\s<>\]]+")
 _TRAILING_URL_PUNCTUATION = ".,;:"
@@ -309,7 +310,12 @@ def get_api_token() -> str:
 
 def get_env_file_candidates() -> list[Path]:
     """Return .env locations worth checking for local development."""
-    candidates = [Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"]
+    candidates: list[Path] = []
+    explicit_env_file = os.environ.get(ENV_FILE_ENV_VAR, "").strip()
+    if explicit_env_file:
+        candidates.append(Path(explicit_env_file).expanduser())
+
+    candidates.extend([Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"])
     deduped: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
