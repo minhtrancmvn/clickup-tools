@@ -81,6 +81,24 @@ def build_page_url(workspace_id: str, doc_id: str, page_id: str) -> str:
     return f"https://app.clickup.com/{workspace_id}/v/dc/{doc_id}/{page_id}"
 
 
+def extract_title(content: str) -> tuple[str | None, str]:
+    """Return (title, body) where the leading H1 line is stripped from body.
+
+    If no H1 is found, returns (None, content) unchanged.
+    """
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            title = stripped[2:].strip()
+            # Drop the H1 line and any immediately following blank line
+            remaining = lines[i + 1 :]
+            if remaining and remaining[0].strip() == "":
+                remaining = remaining[1:]
+            return title, "\n".join(remaining)
+    return None, content
+
+
 def update_page(
     workspace_id: str,
     doc_id: str,
@@ -88,19 +106,21 @@ def update_page(
     content: str,
     api_token: str,
     edit_mode: str = "replace",
+    name: str | None = None,
 ) -> dict[str, Any]:
     """Call the ClickUp Docs API to update a page."""
     url = (
         f"https://api.clickup.com/api/v3/workspaces/{workspace_id}"
         f"/docs/{doc_id}/pages/{page_id}"
     )
-    payload = json.dumps(
-        {
-            "content": content,
-            "content_format": "text/md",
-            "content_edit_mode": edit_mode,
-        }
-    ).encode("utf-8")
+    data: dict[str, Any] = {
+        "content": content,
+        "content_format": "text/md",
+        "content_edit_mode": edit_mode,
+    }
+    if name is not None:
+        data["name"] = name
+    payload = json.dumps(data).encode("utf-8")
 
     request = urllib.request.Request(
         url,
@@ -703,10 +723,14 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     edit_mode = get_edit_mode(args)
     info(f"Mode   : {edit_mode}")
+
+    title, body = extract_title(content)
+    if title:
+        info(f"Title  : {title}")
     print()
 
     try:
-        update_page(workspace_id, doc_id, page_id, content, api_token, edit_mode)
+        update_page(workspace_id, doc_id, page_id, body, api_token, edit_mode, name=title)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode(errors="replace")
         err(f"API error {exc.code} {exc.reason}")

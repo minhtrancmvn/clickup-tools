@@ -4,14 +4,12 @@ Small command-line utilities for ClickUp workflows.
 
 ## Install
 
-Create a local virtual environment and install the package in editable mode:
+Create a local virtual environment and install the package:
 
 ```sh
 cd "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools"
 python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install --upgrade pip
-python3 -m pip install -e .
+.venv/bin/python -m pip install .
 ```
 
 Add your ClickUp credentials to `.env`:
@@ -25,9 +23,24 @@ After installation, these CLI commands are available from the virtual
 environment:
 
 ```sh
-clickup-update-page --help
-clickup-update-task --help
-clickup-mcp-server --help
+.venv/bin/clickup-update-page --help
+.venv/bin/clickup-update-task --help
+.venv/bin/clickup-mcp-server --help
+```
+
+If VS Code reports `spawn ... clickup-mcp-server ENOENT`, the executable was not
+created yet. Rerun the install commands above, then verify:
+
+```sh
+ls -la "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.venv/bin/clickup-mcp-server"
+```
+
+If the command exists but fails with `ModuleNotFoundError: No module named
+'clickup_tools'`, reinstall as a normal package instead of editable mode:
+
+```sh
+python3 -m venv --clear .venv
+.venv/bin/python -m pip install .
 ```
 
 You can also run the local wrapper scripts directly from this repo:
@@ -55,7 +68,10 @@ where you want Copilot to use the tools:
     "clickup-tools": {
       "type": "stdio",
       "command": "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.venv/bin/clickup-mcp-server",
-      "envFile": "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.env"
+      "args": [
+        "--env-file",
+        "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.env"
+      ]
     }
   }
 }
@@ -70,7 +86,7 @@ workspace-relative paths instead:
     "clickup-tools": {
       "type": "stdio",
       "command": "${workspaceFolder}/.venv/bin/clickup-mcp-server",
-      "envFile": "${workspaceFolder}/.env"
+      "args": ["--env-file", "${workspaceFolder}/.env"]
     }
   }
 }
@@ -229,10 +245,11 @@ Run the test suite:
 python3 -m unittest
 ```
 
-Install locally in editable mode if you want the console commands on your PATH:
+Reinstall locally after code changes if you want the console commands to use the
+latest package code:
 
 ```sh
-python3 -m pip install -e .
+.venv/bin/python -m pip install .
 ```
 
 The ClickUp token is read from `CLICKUP_API_TOKEN`. Custom task IDs also use
