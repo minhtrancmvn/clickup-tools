@@ -7,7 +7,7 @@ Small command-line utilities for ClickUp workflows.
 Create a local virtual environment and install the package:
 
 ```sh
-cd "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools"
+cd /path/to/clickup-tools
 python3 -m venv .venv
 .venv/bin/python -m pip install .
 ```
@@ -32,7 +32,7 @@ If VS Code reports `spawn ... clickup-mcp-server ENOENT`, the executable was not
 created yet. Rerun the install commands above, then verify:
 
 ```sh
-ls -la "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.venv/bin/clickup-mcp-server"
+ls -la /path/to/clickup-tools/.venv/bin/clickup-mcp-server
 ```
 
 If the command exists but fails with `ModuleNotFoundError: No module named
@@ -67,10 +67,10 @@ where you want Copilot to use the tools:
   "servers": {
     "clickup-tools": {
       "type": "stdio",
-      "command": "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.venv/bin/clickup-mcp-server",
+      "command": "/path/to/clickup-tools/.venv/bin/clickup-mcp-server",
       "args": [
         "--env-file",
-        "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.env"
+        "/path/to/clickup-tools/.env"
       ]
     }
   }
@@ -104,8 +104,8 @@ with `--env-file`:
 
 ```sh
 codex mcp add clickup-tools -- \
-  "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.venv/bin/clickup-mcp-server" \
-  --env-file "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.env"
+  /path/to/clickup-tools/.venv/bin/clickup-mcp-server \
+  --env-file /path/to/clickup-tools/.env
 codex mcp list
 codex mcp get clickup-tools
 ```
@@ -115,8 +115,8 @@ If you need to replace an existing server config:
 ```sh
 codex mcp remove clickup-tools
 codex mcp add clickup-tools -- \
-  "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.venv/bin/clickup-mcp-server" \
-  --env-file "/Users/coffeemug/Library/Mobile Documents/com~apple~CloudDocs/Programming/ClickUp Tools/.env"
+  /path/to/clickup-tools/.venv/bin/clickup-mcp-server \
+  --env-file /path/to/clickup-tools/.env
 ```
 
 When asking Codex to use these tools, pass absolute Markdown file paths to
