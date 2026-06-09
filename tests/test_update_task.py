@@ -154,6 +154,33 @@ class ClickUpUpdateTaskTests(unittest.TestCase):
         self.assertIn("![flow](<https://attachments.example/flow.gif>)", prepared.content)
         self.assertIn("[download](<https://attachments.example/flow.gif>)", prepared.content)
 
+    def test_prepare_markdown_strips_leading_h1_into_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            markdown = Path(tmp) / "task.md"
+            markdown.write_text(
+                "---\nclickup-task-id: abc123\n---\n"
+                "# SQLSTATE[HY000]: General error: 2006 MySQL server has gone away\n\n"
+                "## Source\n"
+                "- Slack thread: https://example.com/thread\n",
+                encoding="utf-8",
+            )
+
+            prepared = prepare_markdown_task_content(
+                markdown,
+                "pk_test",
+                TaskDestination(task_id="abc123"),
+                rich_links=False,
+            )
+
+        self.assertEqual(
+            prepared.title,
+            "SQLSTATE[HY000]: General error: 2006 MySQL server has gone away",
+        )
+        self.assertEqual(
+            prepared.content,
+            "## Source\n- Slack thread: https://example.com/thread\n",
+        )
+
     def test_prepare_markdown_aborts_on_missing_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             markdown = Path(tmp) / "task.md"
@@ -194,6 +221,26 @@ class ClickUpUpdateTaskTests(unittest.TestCase):
         self.assertEqual(
             json.loads(captured["data"].decode("utf-8")),
             {"markdown_content": "# Body"},
+        )
+
+    def test_update_task_description_can_update_name(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request: object) -> FakeResponse:
+            captured["data"] = request.data
+            return FakeResponse(b"{}")
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            update_task_description(
+                TaskDestination(task_id="abc123"),
+                "## Body",
+                "pk_test",
+                name="Task Title",
+            )
+
+        self.assertEqual(
+            json.loads(captured["data"].decode("utf-8")),
+            {"markdown_content": "## Body", "name": "Task Title"},
         )
 
     def test_build_multipart_body_uses_attachment_field(self) -> None:

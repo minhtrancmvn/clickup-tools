@@ -21,6 +21,7 @@ from .update_page import (
     GREEN,
     RED,
     RESET,
+    extract_title,
     LinkContext,
     get_api_token,
     get_env_value,
@@ -76,6 +77,7 @@ class PreparedTaskContent:
     content: str
     attachments: list[LocalAttachment]
     uploaded_attachments: dict[Path, str]
+    title: str | None = None
     normalized_links: int = 0
 
 
@@ -234,10 +236,14 @@ def update_task_description(
     destination: TaskDestination,
     content: str,
     api_token: str,
+    name: str | None = None,
 ) -> dict[str, Any]:
     """Call the ClickUp API to replace a task description with Markdown content."""
     url = f"https://api.clickup.com/api/v2/task/{destination.task_id}{task_query(destination)}"
-    payload = json.dumps({"markdown_content": content}).encode("utf-8")
+    payload_data = {"markdown_content": content}
+    if name:
+        payload_data["name"] = name
+    payload = json.dumps(payload_data).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=payload,
@@ -338,6 +344,7 @@ def prepare_markdown_task_content(
     """Read Markdown, upload local references, and prepare task description."""
     raw_content = read_markdown(str(markdown_path))
     _metadata, content = parse_front_matter(raw_content)
+    title, content = extract_title(content)
     attachments = find_local_attachment_references(content, markdown_path.parent)
     missing = [attachment for attachment in attachments if not attachment.path.is_file()]
     if missing:
@@ -373,6 +380,7 @@ def prepare_markdown_task_content(
         content=content,
         attachments=attachments,
         uploaded_attachments=uploaded,
+        title=title,
         normalized_links=normalized_count,
     )
 
@@ -472,6 +480,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     else:
         info(f"Target      : task={destination.task_id}")
     info(f"Attachments : uploaded={len(prepared.uploaded_attachments)}")
+    if prepared.title:
+        info(f"Title       : {prepared.title}")
     for path, url in prepared.uploaded_attachments.items():
         info(f"Attachment  : {path.name} -> {url}")
     if not args.no_rich_links:
@@ -479,7 +489,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     print()
 
     try:
-        update_task_description(destination, prepared.content, api_token)
+        update_task_description(destination, prepared.content, api_token, name=prepared.title)
     except urllib.error.HTTPError as exc:
         return report_http_error(exc)
     except urllib.error.URLError as exc:
