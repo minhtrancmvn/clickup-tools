@@ -17,12 +17,14 @@ from clickup_tools.update_task import (  # noqa: E402
     build_multipart_body,
     build_task_url,
     extract_attachment_url,
+    extract_outcome,
     find_local_attachment_references,
     is_custom_task_id,
     parse_task_id,
     prepare_markdown_task_content,
     resolve_destination,
     rewrite_local_attachment_references,
+    set_task_custom_field,
     update_task_description,
 )
 
@@ -257,6 +259,85 @@ class ClickUpUpdateTaskTests(unittest.TestCase):
             extract_attachment_url({"attachment": {"url": "https://example.com/file.png"}}),
             "https://example.com/file.png",
         )
+
+    # ---- extract_outcome ----
+
+    def test_extract_outcome_strips_section(self) -> None:
+        outcome, body = extract_outcome(
+            "## Source\n- link\n\n## Outcome\n- Fixed the thing\n- Deployed\n\n## Notes\nmore text\n"
+        )
+        self.assertEqual(outcome, "- Fixed the thing\n- Deployed")
+        self.assertEqual(body, "## Source\n- link\n\n## Notes\nmore text\n")
+
+    def test_extract_outcome_last_section(self) -> None:
+        outcome, body = extract_outcome(
+            "## Source\n- link\n\n## Outcome\nDone.\n"
+        )
+        self.assertEqual(outcome, "Done.")
+        self.assertEqual(body, "## Source\n- link\n")
+
+    def test_extract_outcome_no_outcome_heading(self) -> None:
+        outcome, body = extract_outcome("## Source\n- link\n\n## Notes\nmore\n")
+        self.assertIsNone(outcome)
+        self.assertEqual(body, "## Source\n- link\n\n## Notes\nmore\n")
+
+    def test_extract_outcome_case_insensitive(self) -> None:
+        outcome, body = extract_outcome("## outcome\nlowercase outcome\n")
+        self.assertEqual(outcome, "lowercase outcome")
+        self.assertEqual(body, "")
+
+    def test_extract_outcome_empty(self) -> None:
+        outcome, body = extract_outcome("## Outcome\n\n## Next\ncontent\n")
+        self.assertIsNone(outcome)
+        self.assertEqual(body, "## Next\ncontent\n")
+
+    def test_set_task_custom_field(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request: object) -> FakeResponse:
+            captured["url"] = request.full_url
+            captured["data"] = request.data
+            return FakeResponse(b"{}")
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            set_task_custom_field(
+                TaskDestination(task_id="abc123"),
+                "8477a7ee-f750-4e8e-8298-0131ef93adab",
+                "Fixed",
+                "pk_test",
+            )
+
+        self.assertEqual(
+            captured["url"],
+            "https://api.clickup.com/api/v2/task/abc123/field/8477a7ee-f750-4e8e-8298-0131ef93adab",
+        )
+        self.assertEqual(
+            json.loads(captured["data"].decode("utf-8")),
+            {"value": "Fixed"},
+        )
+
+    def test_prepare_markdown_extracts_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            markdown = Path(tmp) / "task.md"
+            markdown.write_text(
+                "---\nclickup-task-id: abc123\n---\n"
+                "# Task Title\n\n"
+                "## Source\n- link\n\n"
+                "## Outcome\n- Fixed the bug\n- Deployed\n\n"
+                "## Notes\nmore text\n",
+                encoding="utf-8",
+            )
+
+            prepared = prepare_markdown_task_content(
+                markdown,
+                "pk_test",
+                TaskDestination(task_id="abc123"),
+                rich_links=False,
+            )
+
+        self.assertEqual(prepared.title, "Task Title")
+        self.assertEqual(prepared.outcome, "- Fixed the bug\n- Deployed")
+        self.assertEqual(prepared.content, "## Source\n- link\n\n## Notes\nmore text\n")
 
 
 if __name__ == "__main__":

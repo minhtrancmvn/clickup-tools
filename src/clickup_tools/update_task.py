@@ -39,6 +39,7 @@ _CUSTOM_TASK_ID_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 _MARKDOWN_LINK_OR_IMAGE_RE = re.compile(
     r"(!?\[[^\]]*\]\()(<[^>\n]+>|[^)\s\n]+)([^)\n]*\))"
 )
+_DEFAULT_OUTCOME_FIELD_ID = "8477a7ee-f750-4e8e-8298-0131ef93adab"
 
 
 def ok(message: str) -> None:
@@ -78,7 +79,55 @@ class PreparedTaskContent:
     attachments: list[LocalAttachment]
     uploaded_attachments: dict[Path, str]
     title: str | None = None
+    outcome: str | None = None
     normalized_links: int = 0
+
+
+def extract_outcome(content: str) -> tuple[str | None, str]:
+    """Return (outcome, body) where the ## Outcome section is stripped from body.
+
+    Looks for a level-2 heading exactly titled "Outcome" (case-insensitive).
+    Collects all content under that heading until the next heading of any level.
+    If no Outcome heading is found, returns (None, content) unchanged.
+    """
+    lines = content.split("\n")
+    outcome_lines: list[str] = []
+    body_lines: list[str] = []
+    in_outcome = False
+    outcome_started = False
+
+    for line in lines:
+        stripped = line.strip()
+        is_heading = stripped.startswith("#")
+
+        if is_heading and stripped.startswith("## ") and stripped[3:].strip().lower() == "outcome":
+            in_outcome = True
+            outcome_started = True
+            continue
+
+        if is_heading and in_outcome:
+            in_outcome = False
+            body_lines.append(line)
+            continue
+
+        if in_outcome:
+            outcome_lines.append(line)
+        else:
+            body_lines.append(line)
+
+    # Drop trailing blank line from outcome
+    while outcome_lines and outcome_lines[-1].strip() == "":
+        outcome_lines.pop()
+    # Drop leading blank lines from body after outcome removal
+    while body_lines and body_lines[0].strip() == "":
+        body_lines.pop(0)
+
+    if not outcome_started:
+        return None, content
+
+    outcome = "\n".join(outcome_lines).strip() or None
+    body = "\n".join(body_lines)
+    return outcome, body
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -263,6 +312,34 @@ def update_task_description(
     return json.loads(body)
 
 
+def set_task_custom_field(
+    destination: TaskDestination,
+    field_id: str,
+    value: str,
+    api_token: str,
+) -> dict[str, Any]:
+    """Set a single custom field value on a ClickUp task."""
+    url = f"https://api.clickup.com/api/v2/task/{destination.task_id}/field/{field_id}{task_query(destination)}"
+    payload = json.dumps({"value": value}).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Authorization": api_token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request) as response:
+        body = response.read()
+
+    if not body:
+        return {}
+    return json.loads(body)
+
+
 def upload_task_attachment(
     destination: TaskDestination,
     path: Path,
@@ -345,6 +422,7 @@ def prepare_markdown_task_content(
     raw_content = read_markdown(str(markdown_path))
     _metadata, content = parse_front_matter(raw_content)
     title, content = extract_title(content)
+    outcome, content = extract_outcome(content)
     attachments = find_local_attachment_references(content, markdown_path.parent)
     missing = [attachment for attachment in attachments if not attachment.path.is_file()]
     if missing:
@@ -381,6 +459,7 @@ def prepare_markdown_task_content(
         attachments=attachments,
         uploaded_attachments=uploaded,
         title=title,
+        outcome=outcome,
         normalized_links=normalized_count,
     )
 
@@ -482,6 +561,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     info(f"Attachments : uploaded={len(prepared.uploaded_attachments)}")
     if prepared.title:
         info(f"Title       : {prepared.title}")
+    if prepared.outcome:
+        info(f"Outcome     : {prepared.outcome[:100]}{'...' if len(prepared.outcome) > 100 else ''}")
     for path, url in prepared.uploaded_attachments.items():
         info(f"Attachment  : {path.name} -> {url}")
     if not args.no_rich_links:
@@ -498,6 +579,20 @@ def run(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:
         err(f"Unexpected error: {exc}")
         return 1
+
+    if prepared.outcome:
+        outcome_field_id = get_env_value("CLICKUP_OUTCOME_FIELD_ID").strip() or _DEFAULT_OUTCOME_FIELD_ID
+        try:
+            set_task_custom_field(destination, outcome_field_id, prepared.outcome, api_token)
+            ok(f"Outcome field updated ({outcome_field_id})")
+        except urllib.error.HTTPError as exc:
+            return report_http_error(exc)
+        except urllib.error.URLError as exc:
+            err(f"Network error: {exc.reason}")
+            return 1
+        except Exception as exc:
+            err(f"Unexpected error setting outcome: {exc}")
+            return 1
 
     task_url = build_task_url(destination.task_id, destination.team_id)
     print()
