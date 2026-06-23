@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import json
 import re
 import sys
 import urllib.error
 import urllib.parse
+import urllib.request
 from typing import Any, Sequence
 
 from .update_page import BOLD, RESET
@@ -19,15 +21,37 @@ from .update_task import (
     err,
     get_api_token,
     get_env_value,
-    get_task,
     info,
     is_custom_task_id,
     ok,
     parse_task_id,
     report_http_error,
+    task_query,
 )
 
 _TASK_URL_WITH_TEAM_RE = re.compile(r"app\.clickup\.com/t/([^/?#]+)/([^/?#]+)")
+
+
+@dataclass(frozen=True)
+class TimeEntry:
+    """A single ClickUp time tracking entry."""
+
+    user: str
+    date: str
+    duration: str
+    start_ms: int | None = None
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Subtask:
+    """A child task of the task being read, with its own nested subtasks."""
+
+    task_id: str
+    custom_id: str
+    name: str
+    status: str
+    subtasks: list["Subtask"] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -42,6 +66,9 @@ class TaskDetails:
     tags: list[str]
     outcome_available: bool
     outcome: str
+    time_entries: list[TimeEntry] = field(default_factory=list)
+    time_entries_note: str = ""
+    subtasks: list[Subtask] = field(default_factory=list)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,6 +82,7 @@ examples:
   clickup-read-task --task-id OOLE-523
   clickup-read-task --task-id OOLE-523 --team-id 1234567890
   clickup-read-task https://app.clickup.com/t/1234567890/OOLE-523
+  clickup-read-task --task-id OOLE-523 --json
 
 metadata:
   When no task is provided, the task is read from CLICKUP_TASK_ID in .env.
@@ -72,6 +100,11 @@ authentication:
     )
     parser.add_argument("--task-id", metavar="ID", help="ClickUp task ID, custom task ID, or task URL")
     parser.add_argument("--team-id", metavar="ID", help="ClickUp team/workspace ID for custom task IDs")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output task details as JSON (AI-ready, omits status lines)",
+    )
     return parser
 
 
@@ -117,6 +150,7 @@ def extract_task_details(task: dict[str, Any], *, outcome_field_id: str = "") ->
         tags=extract_tags(task),
         outcome_available=outcome_available,
         outcome=outcome,
+        subtasks=extract_subtasks(task),
     )
 
 
@@ -166,7 +200,11 @@ def format_duration_ms(value: Any) -> str:
 
 def extract_tags(task: dict[str, Any]) -> list[str]:
     """Extract task tag names."""
-    tags = task.get("tags")
+    return tag_names(task.get("tags"))
+
+
+def tag_names(tags: Any) -> list[str]:
+    """Extract display names from a ClickUp tag list (dicts or strings)."""
     if not isinstance(tags, list):
         return []
 
@@ -179,6 +217,199 @@ def extract_tags(task: dict[str, Any]) -> list[str]:
         if name:
             names.append(name)
     return names
+
+
+def _request_json(url: str, api_token: str) -> dict[str, Any]:
+    """GET a URL and parse the JSON response."""
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": api_token,
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.loads(response.read())
+
+
+def get_task_with_subtasks(destination: TaskDestination, api_token: str) -> dict[str, Any]:
+    """Fetch a ClickUp task including its (direct) subtasks.
+
+    The default task response omits subtasks; include_subtasks=true adds a
+    "subtasks" list. Kept local to read_task so the shared get_task (used by
+    the update flow) is left unchanged.
+    """
+    params: dict[str, str] = {"include_subtasks": "true"}
+    if destination.custom_task_id:
+        params["custom_task_ids"] = "true"
+        params["team_id"] = destination.team_id
+    query = urllib.parse.urlencode(params)
+    url = f"https://api.clickup.com/api/v2/task/{destination.task_id}?{query}"
+    return _request_json(url, api_token)
+
+
+def fetch_child_subtasks(task_id: str, api_token: str) -> list[dict[str, Any]]:
+    """Fetch the direct subtasks of a task by its internal ID.
+
+    ClickUp embeds only one level of subtasks per response, so each child must
+    be fetched by ID to discover its own children. Internal task IDs do not
+    require custom_task_ids/team_id.
+    """
+    url = f"https://api.clickup.com/api/v2/task/{task_id}?include_subtasks=true"
+    task = _request_json(url, api_token)
+    raw = task.get("subtasks")
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def extract_subtasks(task: dict[str, Any]) -> list[Subtask]:
+    """Extract direct child tasks from a ClickUp task response (single level)."""
+    subtasks = task.get("subtasks")
+    if not isinstance(subtasks, list):
+        return []
+
+    extracted: list[Subtask] = []
+    for item in subtasks:
+        if not isinstance(item, dict):
+            continue
+        extracted.append(
+            Subtask(
+                task_id=string_value(item.get("id")),
+                custom_id=string_value(item.get("custom_id")),
+                name=string_value(item.get("name")) or "Untitled",
+                status=extract_status(item),
+            )
+        )
+    return extracted
+
+
+# Safety cap on subtask recursion depth to avoid runaway fetches.
+_MAX_SUBTASK_DEPTH = 10
+
+
+def expand_subtasks(
+    subtasks: list[Subtask],
+    api_token: str,
+    *,
+    max_depth: int = _MAX_SUBTASK_DEPTH,
+    _depth: int = 1,
+    _visited: set[str] | None = None,
+) -> list[Subtask]:
+    """Recursively populate each subtask's own subtasks until the tree is exhausted.
+
+    Each node is fetched by internal ID. A visited set guards against cycles and
+    repeated fetches; max_depth bounds the recursion.
+    """
+    if _visited is None:
+        _visited = set()
+
+    expanded: list[Subtask] = []
+    for subtask in subtasks:
+        children: list[Subtask] = []
+        if subtask.task_id and subtask.task_id not in _visited and _depth < max_depth:
+            _visited.add(subtask.task_id)
+            try:
+                raw_children = fetch_child_subtasks(subtask.task_id, api_token)
+            except (urllib.error.HTTPError, urllib.error.URLError):
+                raw_children = []
+            direct = extract_subtasks({"subtasks": raw_children})
+            children = expand_subtasks(
+                direct,
+                api_token,
+                max_depth=max_depth,
+                _depth=_depth + 1,
+                _visited=_visited,
+            )
+        expanded.append(replace(subtask, subtasks=children))
+    return expanded
+
+
+def get_time_entries(destination: TaskDestination, api_token: str) -> list[dict[str, Any]]:
+    """Fetch ClickUp tracked time for a task (all users, all intervals).
+
+    Uses the legacy /task/{id}/time endpoint, which returns every user's
+    intervals with no date window, unlike /team/{id}/time_entries which
+    defaults to the authenticated user and the last 30 days.
+    """
+    url = f"https://api.clickup.com/api/v2/task/{destination.task_id}/time{task_query(destination)}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": api_token,
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+
+    with urllib.request.urlopen(request, timeout=15) as response:
+        payload = json.loads(response.read())
+
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def extract_time_entries(records: list[dict[str, Any]]) -> list[TimeEntry]:
+    """Flatten per-user tracked-time records into individual interval entries.
+
+    Each record holds a user and a list of intervals. Entries are sorted by
+    start time so the output reads chronologically across users.
+    """
+    extracted: list[TimeEntry] = []
+    for record in records:
+        user = extract_entry_user(record.get("user"))
+        intervals = record.get("intervals")
+        if not isinstance(intervals, list):
+            continue
+        for interval in intervals:
+            if not isinstance(interval, dict):
+                continue
+            extracted.append(
+                TimeEntry(
+                    user=user,
+                    date=format_epoch_ms(interval.get("start")),
+                    duration=format_duration_ms(interval.get("time")),
+                    start_ms=parse_epoch_ms(interval.get("start")),
+                    tags=tag_names(interval.get("tags")),
+                )
+            )
+
+    extracted.sort(key=lambda entry: entry.start_ms if entry.start_ms is not None else 0)
+    return extracted
+
+
+def extract_entry_user(user: Any) -> str:
+    """Extract a display name for a time entry user."""
+    if isinstance(user, dict):
+        for key in ("username", "name", "email"):
+            value = string_value(user.get(key))
+            if value:
+                return value
+        user_id = string_value(user.get("id"))
+        if user_id:
+            return f"User {user_id}"
+    return "Unknown"
+
+
+def parse_epoch_ms(value: Any) -> int | None:
+    """Parse a ClickUp epoch-millisecond timestamp into an int."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def format_epoch_ms(value: Any) -> str:
+    """Format a ClickUp epoch-millisecond timestamp as a UTC date-time."""
+    milliseconds = parse_epoch_ms(value)
+    if milliseconds is None:
+        return string_value(value) or "Unknown date"
+
+    moment = datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc)
+    return moment.strftime("%Y-%m-%d %H:%M UTC")
 
 
 def extract_outcome_value(task: dict[str, Any], *, outcome_field_id: str = "") -> tuple[bool, str]:
@@ -280,7 +511,84 @@ def render_task_details(details: TaskDetails) -> str:
     ]
     if details.outcome_available:
         lines.extend(["Outcome:", details.outcome])
+
+    lines.append("Time entries:")
+    if details.time_entries:
+        for entry in details.time_entries:
+            line = f"  - {entry.date}  {entry.user}  {entry.duration}"
+            if entry.tags:
+                line += f"  [{', '.join(entry.tags)}]"
+            lines.append(line)
+    else:
+        lines.append(f"  {details.time_entries_note or 'None'}")
+
+    total = count_subtasks(details.subtasks)
+    lines.append(f"Subtasks: {total}")
+    lines.extend(render_subtask_lines(details.subtasks))
     return "\n".join(lines)
+
+
+def count_subtasks(subtasks: list[Subtask]) -> int:
+    """Count subtasks across the whole nested tree."""
+    return sum(1 + count_subtasks(subtask.subtasks) for subtask in subtasks)
+
+
+def render_subtask_lines(subtasks: list[Subtask], depth: int = 1) -> list[str]:
+    """Render the nested subtask tree as indented text lines."""
+    lines: list[str] = []
+    indent = "  " * depth
+    for subtask in subtasks:
+        label = subtask.custom_id or subtask.task_id
+        lines.append(f"{indent}- {label}  {subtask.name}  ({subtask.status})")
+        lines.extend(render_subtask_lines(subtask.subtasks, depth + 1))
+    return lines
+
+
+def details_to_dict(details: TaskDetails, *, url: str = "") -> dict[str, Any]:
+    """Build an AI-ready, JSON-serialisable mapping of task details."""
+    data: dict[str, Any] = {
+        "title": details.title,
+        "status": details.status,
+        "description": details.description,
+        "time_estimate": details.time_estimate,
+        "tracked_time": details.time_tracked,
+        "tags": list(details.tags),
+        "outcome": details.outcome if details.outcome_available else None,
+        "time_entries": [
+            {
+                "user": entry.user,
+                "date": entry.date,
+                "duration": entry.duration,
+                "start_ms": entry.start_ms,
+                "tags": list(entry.tags),
+            }
+            for entry in details.time_entries
+        ],
+    }
+    if not details.time_entries and details.time_entries_note:
+        data["time_entries_note"] = details.time_entries_note
+    data["has_subtasks"] = bool(details.subtasks)
+    data["subtask_count"] = count_subtasks(details.subtasks)
+    data["subtasks"] = [subtask_to_dict(subtask) for subtask in details.subtasks]
+    if url:
+        data["url"] = url
+    return data
+
+
+def subtask_to_dict(subtask: Subtask) -> dict[str, Any]:
+    """Build a JSON-serialisable mapping for a subtask and its nested subtasks."""
+    return {
+        "task_id": subtask.task_id,
+        "custom_id": subtask.custom_id or None,
+        "name": subtask.name,
+        "status": subtask.status,
+        "subtasks": [subtask_to_dict(child) for child in subtask.subtasks],
+    }
+
+
+def render_task_json(details: TaskDetails, *, url: str = "") -> str:
+    """Render task details as a JSON document."""
+    return json.dumps(details_to_dict(details, url=url), ensure_ascii=False, indent=2)
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -307,13 +615,14 @@ def run(argv: Sequence[str] | None = None) -> int:
         err(str(exc))
         return 1
 
-    if destination.custom_task_id:
-        info(f"Target: task={destination.task_id}  team={destination.team_id}")
-    else:
-        info(f"Target: task={destination.task_id}")
+    if not args.json:
+        if destination.custom_task_id:
+            info(f"Target: task={destination.task_id}  team={destination.team_id}")
+        else:
+            info(f"Target: task={destination.task_id}")
 
     try:
-        task = get_task(destination, api_token)
+        task = get_task_with_subtasks(destination, api_token)
     except urllib.error.HTTPError as exc:
         return report_http_error(exc)
     except urllib.error.URLError as exc:
@@ -325,9 +634,30 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     outcome_field_id = get_env_value("CLICKUP_OUTCOME_FIELD_ID").strip() or _DEFAULT_OUTCOME_FIELD_ID
     details = extract_task_details(task, outcome_field_id=outcome_field_id)
-    print(render_task_details(details))
-    print()
-    ok(f"URL: {BOLD}{build_task_url(destination.task_id, destination.team_id)}{RESET}")
+
+    if details.subtasks:
+        try:
+            details = replace(details, subtasks=expand_subtasks(details.subtasks, api_token))
+        except (urllib.error.HTTPError, urllib.error.URLError):
+            pass  # Keep the direct subtasks already extracted.
+
+    try:
+        raw_records = get_time_entries(destination, api_token)
+        details = replace(details, time_entries=extract_time_entries(raw_records))
+    except urllib.error.HTTPError as exc:
+        details = replace(details, time_entries_note=f"Unavailable (API error {exc.code})")
+    except urllib.error.URLError as exc:
+        details = replace(details, time_entries_note=f"Unavailable (network error: {exc.reason})")
+    except Exception as exc:
+        details = replace(details, time_entries_note=f"Unavailable ({exc})")
+
+    task_url = build_task_url(destination.task_id, destination.team_id)
+    if args.json:
+        print(render_task_json(details, url=task_url))
+    else:
+        print(render_task_details(details))
+        print()
+        ok(f"URL: {BOLD}{task_url}{RESET}")
     return 0
 
 

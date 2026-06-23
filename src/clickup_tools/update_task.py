@@ -83,53 +83,6 @@ class PreparedTaskContent:
     normalized_links: int = 0
 
 
-def extract_outcome(content: str) -> tuple[str | None, str]:
-    """Return (outcome, body) where the ## Outcome section is stripped from body.
-
-    Looks for a level-2 heading exactly titled "Outcome" (case-insensitive).
-    Collects all content under that heading until the next heading of any level.
-    If no Outcome heading is found, returns (None, content) unchanged.
-    """
-    lines = content.split("\n")
-    outcome_lines: list[str] = []
-    body_lines: list[str] = []
-    in_outcome = False
-    outcome_started = False
-
-    for line in lines:
-        stripped = line.strip()
-        is_heading = stripped.startswith("#")
-
-        if is_heading and stripped.startswith("## ") and stripped[3:].strip().lower() == "outcome":
-            in_outcome = True
-            outcome_started = True
-            continue
-
-        if is_heading and in_outcome:
-            in_outcome = False
-            body_lines.append(line)
-            continue
-
-        if in_outcome:
-            outcome_lines.append(line)
-        else:
-            body_lines.append(line)
-
-    # Drop trailing blank line from outcome
-    while outcome_lines and outcome_lines[-1].strip() == "":
-        outcome_lines.pop()
-    # Drop leading blank lines from body after outcome removal
-    while body_lines and body_lines[0].strip() == "":
-        body_lines.pop(0)
-
-    if not outcome_started:
-        return None, content
-
-    outcome = "\n".join(outcome_lines).strip() or None
-    body = "\n".join(body_lines)
-    return outcome, body
-
-
 def build_parser() -> argparse.ArgumentParser:
     """Create the command-line parser."""
     parser = argparse.ArgumentParser(
@@ -420,9 +373,9 @@ def prepare_markdown_task_content(
 ) -> PreparedTaskContent:
     """Read Markdown, upload local references, and prepare task description."""
     raw_content = read_markdown(str(markdown_path))
-    _metadata, content = parse_front_matter(raw_content)
+    metadata, content = parse_front_matter(raw_content)
     title, content = extract_title(content)
-    outcome, content = extract_outcome(content)
+    outcome = metadata.get("outcome", "").strip() or None
     attachments = find_local_attachment_references(content, markdown_path.parent)
     missing = [attachment for attachment in attachments if not attachment.path.is_file()]
     if missing:

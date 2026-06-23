@@ -17,7 +17,6 @@ from clickup_tools.update_task import (  # noqa: E402
     build_multipart_body,
     build_task_url,
     extract_attachment_url,
-    extract_outcome,
     find_local_attachment_references,
     is_custom_task_id,
     parse_task_id,
@@ -260,36 +259,45 @@ class ClickUpUpdateTaskTests(unittest.TestCase):
             "https://example.com/file.png",
         )
 
-    # ---- extract_outcome ----
+    # ---- outcome frontmatter ----
 
-    def test_extract_outcome_strips_section(self) -> None:
-        outcome, body = extract_outcome(
-            "## Source\n- link\n\n## Outcome\n- Fixed the thing\n- Deployed\n\n## Notes\nmore text\n"
-        )
-        self.assertEqual(outcome, "- Fixed the thing\n- Deployed")
-        self.assertEqual(body, "## Source\n- link\n\n## Notes\nmore text\n")
+    def test_prepare_markdown_reads_outcome_from_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            markdown = Path(tmp) / "task.md"
+            markdown.write_text(
+                "---\nclickup-task-id: abc123\noutcome: Fixed and deployed\n---\n"
+                "# Task Title\n\n"
+                "## Source\n- link\n",
+                encoding="utf-8",
+            )
 
-    def test_extract_outcome_last_section(self) -> None:
-        outcome, body = extract_outcome(
-            "## Source\n- link\n\n## Outcome\nDone.\n"
-        )
-        self.assertEqual(outcome, "Done.")
-        self.assertEqual(body, "## Source\n- link\n")
+            prepared = prepare_markdown_task_content(
+                markdown,
+                "pk_test",
+                TaskDestination(task_id="abc123"),
+                rich_links=False,
+            )
 
-    def test_extract_outcome_no_outcome_heading(self) -> None:
-        outcome, body = extract_outcome("## Source\n- link\n\n## Notes\nmore\n")
-        self.assertIsNone(outcome)
-        self.assertEqual(body, "## Source\n- link\n\n## Notes\nmore\n")
+        self.assertEqual(prepared.outcome, "Fixed and deployed")
 
-    def test_extract_outcome_case_insensitive(self) -> None:
-        outcome, body = extract_outcome("## outcome\nlowercase outcome\n")
-        self.assertEqual(outcome, "lowercase outcome")
-        self.assertEqual(body, "")
+    def test_prepare_markdown_outcome_absent_from_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            markdown = Path(tmp) / "task.md"
+            markdown.write_text(
+                "---\nclickup-task-id: abc123\n---\n"
+                "# Task Title\n\n"
+                "## Outcome\n- this heading is ignored now\n",
+                encoding="utf-8",
+            )
 
-    def test_extract_outcome_empty(self) -> None:
-        outcome, body = extract_outcome("## Outcome\n\n## Next\ncontent\n")
-        self.assertIsNone(outcome)
-        self.assertEqual(body, "## Next\ncontent\n")
+            prepared = prepare_markdown_task_content(
+                markdown,
+                "pk_test",
+                TaskDestination(task_id="abc123"),
+                rich_links=False,
+            )
+
+        self.assertIsNone(prepared.outcome)
 
     def test_set_task_custom_field(self) -> None:
         captured = {}
@@ -320,10 +328,9 @@ class ClickUpUpdateTaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             markdown = Path(tmp) / "task.md"
             markdown.write_text(
-                "---\nclickup-task-id: abc123\n---\n"
+                "---\nclickup-task-id: abc123\noutcome: Fixed the bug and deployed\n---\n"
                 "# Task Title\n\n"
                 "## Source\n- link\n\n"
-                "## Outcome\n- Fixed the bug\n- Deployed\n\n"
                 "## Notes\nmore text\n",
                 encoding="utf-8",
             )
@@ -336,7 +343,7 @@ class ClickUpUpdateTaskTests(unittest.TestCase):
             )
 
         self.assertEqual(prepared.title, "Task Title")
-        self.assertEqual(prepared.outcome, "- Fixed the bug\n- Deployed")
+        self.assertEqual(prepared.outcome, "Fixed the bug and deployed")
         self.assertEqual(prepared.content, "## Source\n- link\n\n## Notes\nmore text\n")
 
 

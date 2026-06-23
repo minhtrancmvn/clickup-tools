@@ -105,10 +105,11 @@ def read_clickup_task(
     task_id: str = "",
     team_id: str = "",
 ) -> str:
-    """Read selected details from a ClickUp task.
+    """Read selected details from a ClickUp task as a JSON document.
 
-    Returns title, status, description, time estimate, tracked time, tags, and
-    the Outcome custom field when that field is available on the task.
+    Returns a JSON object with title, status, description, time estimate,
+    tracked time, tags, the Outcome custom field, individual time entries
+    (user, date, duration), and the task URL.
 
     When task_id is omitted, it is read from CLICKUP_TASK_ID in the environment
     or .env file. For custom task IDs, set CLICKUP_TEAM_ID in the environment or
@@ -119,7 +120,7 @@ def read_clickup_task(
             Falls back to CLICKUP_TASK_ID when omitted.
         team_id: Optional ClickUp team/workspace ID for custom task IDs.
     """
-    argv = []
+    argv = ["--json"]
     if task_id:
         argv.extend(["--task-id", task_id])
     if team_id:

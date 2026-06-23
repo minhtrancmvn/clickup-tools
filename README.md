@@ -210,7 +210,13 @@ attachments in ClickUp.
 
 Reads selected details from a ClickUp task using the ClickUp Tasks API. The
 output includes title, status, description, time estimate, tracked time, tags,
-and the `Outcome` custom field when that field is available on the task.
+and the `Outcome` custom field when that field is available on the task. It also
+lists individual time tracking entries, each with the user, date, duration, and
+any tags on that entry, using the ClickUp tracked-time endpoint (all users, all
+intervals), plus the full subtask tree (each with ID, name, and status). Subtasks
+are fetched recursively — ClickUp returns only one level per request, so each
+child is fetched in turn until the tree is exhausted (capped at 10 levels deep,
+with a cycle guard).
 
 ```sh
 ./clickup-read-task.py --task-id OOLE-523
@@ -224,14 +230,31 @@ When no task is given, the task is read from `CLICKUP_TASK_ID` in `.env`:
 ./clickup-read-task.py
 ```
 
+Pass `--json` to emit an AI-ready JSON document instead of human-readable text.
+The status lines and URL footer are suppressed so stdout is a single JSON object:
+
+```sh
+./clickup-read-task.py --task-id OOLE-523 --json
+```
+
+The JSON object has these keys: `title`, `status`, `description`,
+`time_estimate`, `tracked_time`, `tags`, `outcome` (`null` when absent),
+`time_entries` (each with `user`, `date`, `duration`, `start_ms`, `tags`),
+`has_subtasks`, `subtask_count` (total across the whole tree), `subtasks` (each
+with `task_id`, `custom_id`, `name`, `status`, and a nested `subtasks` list),
+and `url`.
+
 For custom task IDs such as `OOLE-523`, set `CLICKUP_TEAM_ID` in `.env`, pass
 `--team-id`, or use a task URL that includes the team/workspace ID. Internal
 ClickUp task IDs do not require a team ID.
 
-The MCP tool is named `read_clickup_task` and accepts:
+The MCP tool is named `read_clickup_task`. It returns the task details as a
+JSON document (the same shape as `--json` above), making the output AI-ready.
+It accepts:
 
 ```text
-task_id: ClickUp task ID, custom task ID, or task URL
+task_id: Optional ClickUp task ID, custom task ID, or task URL
+         (falls back to CLICKUP_TASK_ID when omitted)
 team_id: Optional ClickUp team/workspace ID for custom task IDs
 ```
 
