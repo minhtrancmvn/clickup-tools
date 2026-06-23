@@ -25,6 +25,7 @@ environment:
 ```sh
 .venv/bin/clickup-update-page --help
 .venv/bin/clickup-update-task --help
+.venv/bin/clickup-read-task --help
 .venv/bin/clickup-mcp-server --help
 ```
 
@@ -48,14 +49,16 @@ You can also run the local wrapper scripts directly from this repo:
 ```sh
 ./clickup-update-page.py --help
 ./clickup-update-task.py --help
+./clickup-read-task.py --help
 ```
 
 ## MCP Setup
 
-The MCP server exposes both tools:
+The MCP server exposes these tools:
 
 - `update_clickup_page`
 - `update_clickup_task`
+- `read_clickup_task`
 
 ### VS Code / GitHub Copilot
 
@@ -119,11 +122,13 @@ codex mcp add clickup-tools -- \
   --env-file /path/to/clickup-tools/.env
 ```
 
-When asking Codex to use these tools, pass absolute Markdown file paths to
-`update_clickup_page` or `update_clickup_task`. For example:
+When asking Codex to use the update tools, pass absolute Markdown file paths to
+`update_clickup_page` or `update_clickup_task`. For read-only task lookups, pass a
+ClickUp task ID, custom task ID, or task URL to `read_clickup_task`. For example:
 
 ```text
 Use update_clickup_task with file_path="/absolute/path/to/spec.md".
+Use read_clickup_task with task_id="OOLE-523".
 ```
 
 ## Tools
@@ -201,6 +206,35 @@ Remote URLs and anchors are left unchanged. Existing task attachments are not
 deleted or reused, so rerunning the task updater can create duplicate
 attachments in ClickUp.
 
+### `clickup-read-task`
+
+Reads selected details from a ClickUp task using the ClickUp Tasks API. The
+output includes title, status, description, time estimate, tracked time, tags,
+and the `Outcome` custom field when that field is available on the task.
+
+```sh
+./clickup-read-task.py --task-id OOLE-523
+./clickup-read-task.py --task-id OOLE-523 --team-id your_team_id
+./clickup-read-task.py 'https://app.clickup.com/t/your_team_id/OOLE-523'
+```
+
+When no task is given, the task is read from `CLICKUP_TASK_ID` in `.env`:
+
+```sh
+./clickup-read-task.py
+```
+
+For custom task IDs such as `OOLE-523`, set `CLICKUP_TEAM_ID` in `.env`, pass
+`--team-id`, or use a task URL that includes the team/workspace ID. Internal
+ClickUp task IDs do not require a team ID.
+
+The MCP tool is named `read_clickup_task` and accepts:
+
+```text
+task_id: ClickUp task ID, custom task ID, or task URL
+team_id: Optional ClickUp team/workspace ID for custom task IDs
+```
+
 ## Markdown Preparation
 
 Before uploading, the tool prepares the Markdown for ClickUp:
@@ -232,6 +266,7 @@ CLICKUP_TEAM_ID=your_team_id
 .
 ├── clickup-update-page.py      # Compatibility wrapper for direct local use
 ├── clickup-update-task.py      # Compatibility wrapper for task descriptions
+├── clickup-read-task.py        # Compatibility wrapper for reading task details
 ├── pyproject.toml              # Package metadata and console script
 ├── src/clickup_tools/          # Importable Python package
 └── tests/                      # Standard-library unittest tests

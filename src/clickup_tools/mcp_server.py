@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .update_page import ENV_FILE_ENV_VAR
 from .update_page import run as run_page
+from .read_task import run as run_read_task
 from .update_task import run as run_task
 
 mcp = FastMCP("clickup-tools")
@@ -95,6 +96,40 @@ def update_clickup_task(
 
     with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
         exit_code = run_task(argv)
+
+    return format_tool_result(exit_code, stdout_buf.getvalue(), stderr_buf.getvalue())
+
+
+@mcp.tool()
+def read_clickup_task(
+    task_id: str = "",
+    team_id: str = "",
+) -> str:
+    """Read selected details from a ClickUp task.
+
+    Returns title, status, description, time estimate, tracked time, tags, and
+    the Outcome custom field when that field is available on the task.
+
+    When task_id is omitted, it is read from CLICKUP_TASK_ID in the environment
+    or .env file. For custom task IDs, set CLICKUP_TEAM_ID in the environment or
+    .env file. The optional team_id arg overrides the environment value.
+
+    Args:
+        task_id: Optional ClickUp task ID, custom task ID, or task URL.
+            Falls back to CLICKUP_TASK_ID when omitted.
+        team_id: Optional ClickUp team/workspace ID for custom task IDs.
+    """
+    argv = []
+    if task_id:
+        argv.extend(["--task-id", task_id])
+    if team_id:
+        argv.extend(["--team-id", team_id])
+
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+
+    with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+        exit_code = run_read_task(argv)
 
     return format_tool_result(exit_code, stdout_buf.getvalue(), stderr_buf.getvalue())
 

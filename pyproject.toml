@@ -24,6 +24,7 @@ dependencies = [
 [project.scripts]
 clickup-update-page = "clickup_tools.update_page:main"
 clickup-update-task = "clickup_tools.update_task:main"
+clickup-read-task   = "clickup_tools.read_task:main"
 clickup-mcp-server  = "clickup_tools.mcp_server:run_server"
 
 [tool.setuptools.packages.find]
