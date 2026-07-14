@@ -30,6 +30,20 @@ from .update_task import (
 )
 
 _TASK_URL_WITH_TEAM_RE = re.compile(r"app\.clickup\.com/t/([^/?#]+)/([^/?#]+)")
+_DEFAULT_COMMENT_LIMIT = 20
+_MAX_COMMENT_LIMIT = 25
+
+
+@dataclass(frozen=True)
+class Comment:
+    """A ClickUp task comment."""
+
+    comment_id: str
+    user: str
+    date: str
+    date_ms: int | None
+    text: str
+    resolved: bool
 
 
 @dataclass(frozen=True)
@@ -69,6 +83,22 @@ class TaskDetails:
     time_entries: list[TimeEntry] = field(default_factory=list)
     time_entries_note: str = ""
     subtasks: list[Subtask] = field(default_factory=list)
+    comments: list[Comment] = field(default_factory=list)
+    comments_included: bool = False
+    comments_note: str = ""
+
+
+def comment_limit(value: str) -> int:
+    """Parse a comment count bounded by ClickUp's 25-comment API page."""
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("comment limit must be an integer") from exc
+    if not 1 <= limit <= _MAX_COMMENT_LIMIT:
+        raise argparse.ArgumentTypeError(
+            f"comment limit must be between 1 and {_MAX_COMMENT_LIMIT}"
+        )
+    return limit
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,6 +113,7 @@ examples:
   clickup-read-task --task-id OOLE-523 --team-id 1234567890
   clickup-read-task https://app.clickup.com/t/1234567890/OOLE-523
   clickup-read-task --task-id OOLE-523 --json
+  clickup-read-task --task-id OOLE-523 --include-comments --comment-limit 10
 
 metadata:
   When no task is provided, the task is read from CLICKUP_TASK_ID in .env.
@@ -104,6 +135,18 @@ authentication:
         "--json",
         action="store_true",
         help="Output task details as JSON (AI-ready, omits status lines)",
+    )
+    parser.add_argument(
+        "--include-comments",
+        action="store_true",
+        help="Include recent task comments",
+    )
+    parser.add_argument(
+        "--comment-limit",
+        type=comment_limit,
+        default=_DEFAULT_COMMENT_LIMIT,
+        metavar="COUNT",
+        help=f"Maximum comments to include (1-{_MAX_COMMENT_LIMIT}, default: {_DEFAULT_COMMENT_LIMIT})",
     )
     return parser
 
@@ -324,6 +367,52 @@ def expand_subtasks(
     return expanded
 
 
+def get_task_comments(
+    destination: TaskDestination,
+    api_token: str,
+    *,
+    limit: int = _DEFAULT_COMMENT_LIMIT,
+) -> list[dict[str, Any]]:
+    """Fetch the newest ClickUp task comments, bounded to one API page."""
+    url = f"https://api.clickup.com/api/v2/task/{destination.task_id}/comment{task_query(destination)}"
+    payload = _request_json(url, api_token)
+    comments = payload.get("comments")
+    if not isinstance(comments, list):
+        return []
+    return [item for item in comments if isinstance(item, dict)][:limit]
+
+
+def extract_comments(records: list[dict[str, Any]]) -> list[Comment]:
+    """Extract stable, AI-ready fields from ClickUp task comments."""
+    return [
+        Comment(
+            comment_id=string_value(record.get("id")),
+            user=extract_entry_user(record.get("user")),
+            date=format_epoch_ms(record.get("date")),
+            date_ms=parse_epoch_ms(record.get("date")),
+            text=extract_comment_text(record),
+            resolved=record.get("resolved") is True,
+        )
+        for record in records
+    ]
+
+
+def extract_comment_text(record: dict[str, Any]) -> str:
+    """Extract plain comment text, falling back to rich-text fragments."""
+    plain_text = string_value(record.get("comment_text"))
+    if plain_text:
+        return plain_text
+
+    fragments = record.get("comment")
+    if not isinstance(fragments, list):
+        return ""
+    return "".join(
+        text if isinstance(text := fragment.get("text"), str) else string_value(text)
+        for fragment in fragments
+        if isinstance(fragment, dict)
+    ).strip()
+
+
 def get_time_entries(destination: TaskDestination, api_token: str) -> list[dict[str, Any]]:
     """Fetch ClickUp tracked time for a task (all users, all intervals).
 
@@ -525,6 +614,15 @@ def render_task_details(details: TaskDetails) -> str:
     total = count_subtasks(details.subtasks)
     lines.append(f"Subtasks: {total}")
     lines.extend(render_subtask_lines(details.subtasks))
+
+    if details.comments_included:
+        lines.append(f"Comments: {len(details.comments)}")
+        if details.comments:
+            for comment in details.comments:
+                resolved = "  [resolved]" if comment.resolved else ""
+                lines.append(f"  - {comment.date}  {comment.user}  {comment.text}{resolved}")
+        else:
+            lines.append(f"  {details.comments_note or 'None'}")
     return "\n".join(lines)
 
 
@@ -570,9 +668,25 @@ def details_to_dict(details: TaskDetails, *, url: str = "") -> dict[str, Any]:
     data["has_subtasks"] = bool(details.subtasks)
     data["subtask_count"] = count_subtasks(details.subtasks)
     data["subtasks"] = [subtask_to_dict(subtask) for subtask in details.subtasks]
+    if details.comments_included:
+        data["comments"] = [comment_to_dict(comment) for comment in details.comments]
+        if not details.comments and details.comments_note:
+            data["comments_note"] = details.comments_note
     if url:
         data["url"] = url
     return data
+
+
+def comment_to_dict(comment: Comment) -> dict[str, Any]:
+    """Build a JSON-serialisable mapping for a task comment."""
+    return {
+        "id": comment.comment_id,
+        "user": comment.user,
+        "date": comment.date,
+        "date_ms": comment.date_ms,
+        "text": comment.text,
+        "resolved": comment.resolved,
+    }
 
 
 def subtask_to_dict(subtask: Subtask) -> dict[str, Any]:
@@ -650,6 +764,33 @@ def run(argv: Sequence[str] | None = None) -> int:
         details = replace(details, time_entries_note=f"Unavailable (network error: {exc.reason})")
     except Exception as exc:
         details = replace(details, time_entries_note=f"Unavailable ({exc})")
+
+    if args.include_comments:
+        try:
+            raw_comments = get_task_comments(destination, api_token, limit=args.comment_limit)
+            details = replace(
+                details,
+                comments=extract_comments(raw_comments),
+                comments_included=True,
+            )
+        except urllib.error.HTTPError as exc:
+            details = replace(
+                details,
+                comments_included=True,
+                comments_note=f"Unavailable (API error {exc.code})",
+            )
+        except urllib.error.URLError as exc:
+            details = replace(
+                details,
+                comments_included=True,
+                comments_note=f"Unavailable (network error: {exc.reason})",
+            )
+        except Exception as exc:
+            details = replace(
+                details,
+                comments_included=True,
+                comments_note=f"Unavailable ({exc})",
+            )
 
     task_url = build_task_url(destination.task_id, destination.team_id)
     if args.json:

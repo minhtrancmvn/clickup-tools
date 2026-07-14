@@ -104,12 +104,16 @@ def update_clickup_task(
 def read_clickup_task(
     task_id: str = "",
     team_id: str = "",
+    include_comments: bool = False,
+    comment_limit: int = 20,
 ) -> str:
     """Read selected details from a ClickUp task as a JSON document.
 
     Returns a JSON object with title, status, description, time estimate,
     tracked time, tags, the Outcome custom field, individual time entries
-    (user, date, duration), and the task URL.
+    (user, date, duration), and the task URL. Call with include_comments=True
+    when recent discussion is needed; comments are omitted by default to keep
+    reads fast and output small.
 
     When task_id is omitted, it is read from CLICKUP_TASK_ID in the environment
     or .env file. For custom task IDs, set CLICKUP_TEAM_ID in the environment or
@@ -119,12 +123,17 @@ def read_clickup_task(
         task_id: Optional ClickUp task ID, custom task ID, or task URL.
             Falls back to CLICKUP_TASK_ID when omitted.
         team_id: Optional ClickUp team/workspace ID for custom task IDs.
+        include_comments: Include recent task comments when True. Defaults to False.
+        comment_limit: Maximum comments to return, from 1 to 25. Defaults to 20.
     """
     argv = ["--json"]
     if task_id:
         argv.extend(["--task-id", task_id])
     if team_id:
         argv.extend(["--team-id", team_id])
+    if include_comments:
+        argv.append("--include-comments")
+        argv.extend(["--comment-limit", str(comment_limit)])
 
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()

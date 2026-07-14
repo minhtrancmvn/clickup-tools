@@ -237,12 +237,21 @@ The status lines and URL footer are suppressed so stdout is a single JSON object
 ./clickup-read-task.py --task-id OOLE-523 --json
 ```
 
+Include up to 20 recent comments with `--include-comments`. Use
+`--comment-limit` to request 1-25 comments; comments remain newest first:
+
+```sh
+./clickup-read-task.py --task-id OOLE-523 --json --include-comments --comment-limit 10
+```
+
 The JSON object has these keys: `title`, `status`, `description`,
 `time_estimate`, `tracked_time`, `tags`, `outcome` (`null` when absent),
 `time_entries` (each with `user`, `date`, `duration`, `start_ms`, `tags`),
 `has_subtasks`, `subtask_count` (total across the whole tree), `subtasks` (each
 with `task_id`, `custom_id`, `name`, `status`, and a nested `subtasks` list),
-and `url`.
+and `url`. When comments are requested, it also includes `comments` (each with
+`id`, `user`, `date`, `date_ms`, `text`, and `resolved`). A comment API failure
+adds `comments_note` without failing the task read.
 
 For custom task IDs such as `OOLE-523`, set `CLICKUP_TEAM_ID` in `.env`, pass
 `--team-id`, or use a task URL that includes the team/workspace ID. Internal
@@ -256,6 +265,8 @@ It accepts:
 task_id: Optional ClickUp task ID, custom task ID, or task URL
          (falls back to CLICKUP_TASK_ID when omitted)
 team_id: Optional ClickUp team/workspace ID for custom task IDs
+include_comments: Include recent comments when true (default: false)
+comment_limit: Maximum comments to include, from 1 to 25 (default: 20)
 ```
 
 ## Markdown Preparation

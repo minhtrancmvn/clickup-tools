@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
+from clickup_tools import read_task as read_task_module  # noqa: E402
 from clickup_tools.read_task import (  # noqa: E402
     Subtask,
     count_subtasks,
@@ -140,6 +141,120 @@ class ClickUpReadTaskTests(unittest.TestCase):
         self.assertIn("Tracked time: 30m (1,800,000 ms)", rendered)
         self.assertIn("Tags: bug", rendered)
         self.assertIn("Outcome:\nShipped", rendered)
+
+    def test_comments_default_to_disabled(self) -> None:
+        args = read_task_module.build_parser().parse_args([])
+
+        self.assertFalse(args.include_comments)
+        self.assertEqual(args.comment_limit, 20)
+
+    def test_comment_limit_rejects_values_above_api_page_size(self) -> None:
+        parser = read_task_module.build_parser()
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--comment-limit", "26"])
+
+    def test_get_task_comments_uses_custom_task_query_and_limit(self) -> None:
+        destination = TaskDestination(
+            task_id="OOLE-523",
+            team_id="1234567890",
+            custom_task_id=True,
+        )
+        captured: dict[str, object] = {}
+
+        def fake_request(url: str, api_token: str) -> dict:
+            captured["url"] = url
+            captured["api_token"] = api_token
+            return {"comments": [{"id": str(index)} for index in range(25)]}
+
+        with patch("clickup_tools.read_task._request_json", fake_request):
+            comments = read_task_module.get_task_comments(destination, "pk_test", limit=2)
+
+        self.assertEqual(
+            captured["url"],
+            "https://api.clickup.com/api/v2/task/OOLE-523/comment?custom_task_ids=true&team_id=1234567890",
+        )
+        self.assertEqual(captured["api_token"], "pk_test")
+        self.assertEqual([comment["id"] for comment in comments], ["0", "1"])
+
+    def test_extract_comments_prefers_plain_text_and_falls_back_to_rich_text(self) -> None:
+        comments = read_task_module.extract_comments(
+            [
+                {
+                    "id": "458",
+                    "comment_text": "First comment",
+                    "comment": [{"text": "Ignored rich text"}],
+                    "user": {"username": "Alice"},
+                    "date": "1568036964079",
+                    "resolved": False,
+                },
+                {
+                    "id": "459",
+                    "comment": [{"text": "Rich "}, {"text": "comment"}],
+                    "user": {"id": 42},
+                    "date": "1568037964079",
+                    "resolved": True,
+                },
+            ]
+        )
+
+        self.assertEqual(comments[0].text, "First comment")
+        self.assertEqual(comments[0].user, "Alice")
+        self.assertEqual(comments[0].date_ms, 1568036964079)
+        self.assertEqual(comments[1].text, "Rich comment")
+        self.assertEqual(comments[1].user, "User 42")
+        self.assertTrue(comments[1].resolved)
+
+    def test_requested_comments_appear_in_text_and_json(self) -> None:
+        from dataclasses import replace as dc_replace
+
+        details = extract_task_details(
+            {"name": "Task", "status": "open", "custom_fields": []},
+            outcome_field_id="",
+        )
+        details = dc_replace(
+            details,
+            comments=[
+                read_task_module.Comment(
+                    comment_id="458",
+                    user="Alice",
+                    date="2019-09-09 09:49 UTC",
+                    date_ms=1568036964079,
+                    text="First comment",
+                    resolved=False,
+                )
+            ],
+            comments_included=True,
+        )
+
+        rendered = render_task_details(details)
+        data = details_to_dict(details)
+
+        self.assertIn("Comments: 1", rendered)
+        self.assertIn("Alice  First comment", rendered)
+        self.assertEqual(
+            data["comments"],
+            [
+                {
+                    "id": "458",
+                    "user": "Alice",
+                    "date": "2019-09-09 09:49 UTC",
+                    "date_ms": 1568036964079,
+                    "text": "First comment",
+                    "resolved": False,
+                }
+            ],
+        )
+
+    def test_comments_are_absent_when_not_requested(self) -> None:
+        details = extract_task_details(
+            {"name": "Task", "status": "open", "custom_fields": []},
+            outcome_field_id="",
+        )
+
+        self.assertNotIn("Comments:", render_task_details(details))
+        self.assertNotIn("comments", details_to_dict(details))
+        self.assertNotIn("comments_note", details_to_dict(details))
 
     def test_render_task_json_is_ai_ready(self) -> None:
         from clickup_tools.read_task import TimeEntry
@@ -545,6 +660,174 @@ class ClickUpReadTaskTests(unittest.TestCase):
 
         runner.assert_called_once_with(["--json", "--task-id", "OOLE-523", "--team-id", "1234567890"])
         self.assertEqual(result, "Success.\n")
+
+    def test_mcp_read_clickup_task_passes_comment_options_to_runner(self) -> None:
+        with patch("clickup_tools.mcp_server.run_read_task", return_value=0) as runner:
+            result = read_clickup_task("OOLE-523", "1234567890", include_comments=True, comment_limit=5)
+
+        runner.assert_called_once_with(
+            [
+                "--json",
+                "--task-id",
+                "OOLE-523",
+                "--team-id",
+                "1234567890",
+                "--include-comments",
+                "--comment-limit",
+                "5",
+            ]
+        )
+        self.assertEqual(result, "Success.\n")
+
+    def test_run_fetches_comments_only_when_requested(self) -> None:
+        task_payload = {
+            "id": "abc123",
+            "name": "Commented Task",
+            "status": {"status": "open"},
+            "description": "Body",
+            "tags": [],
+            "custom_fields": [],
+        }
+        comments_payload = {
+            "comments": [
+                {
+                    "id": "458",
+                    "comment_text": "First comment",
+                    "user": {"username": "Alice"},
+                    "date": "1568036964079",
+                    "resolved": False,
+                },
+                {
+                    "id": "459",
+                    "comment_text": "Second comment",
+                    "user": {"username": "Bob"},
+                    "date": "1568037964079",
+                    "resolved": True,
+                },
+            ]
+        }
+        urls: list[str] = []
+
+        class FakeResponse:
+            def __init__(self, body: dict) -> None:
+                self._body = body
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps(self._body).encode("utf-8")
+
+        def fake_urlopen(request: object, timeout: int = 0) -> FakeResponse:
+            urls.append(request.full_url)
+            if "/comment" in request.full_url:
+                return FakeResponse(comments_payload)
+            if request.full_url.endswith("/time"):
+                return FakeResponse({"data": []})
+            return FakeResponse(task_payload)
+
+        with (
+            patch("clickup_tools.read_task.get_api_token", return_value="pk_test"),
+            patch("clickup_tools.read_task.get_env_value", return_value=""),
+            patch("urllib.request.urlopen", fake_urlopen),
+            patch("sys.stdout") as stdout,
+        ):
+            exit_code = run(
+                ["--task-id", "abc123", "--json", "--include-comments", "--comment-limit", "1"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(any(url.endswith("/task/abc123/comment") for url in urls))
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        data = json.loads(output)
+        self.assertEqual(len(data["comments"]), 1)
+        self.assertEqual(data["comments"][0]["text"], "First comment")
+
+    def test_run_skips_comment_request_by_default(self) -> None:
+        task_payload = {
+            "id": "abc123",
+            "name": "Task",
+            "status": {"status": "open"},
+            "description": "Body",
+            "tags": [],
+            "custom_fields": [],
+        }
+        urls: list[str] = []
+
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                payload = {"data": []} if urls[-1].endswith("/time") else task_payload
+                return json.dumps(payload).encode("utf-8")
+
+        def fake_urlopen(request: object, timeout: int = 0) -> FakeResponse:
+            urls.append(request.full_url)
+            return FakeResponse()
+
+        with (
+            patch("clickup_tools.read_task.get_api_token", return_value="pk_test"),
+            patch("clickup_tools.read_task.get_env_value", return_value=""),
+            patch("urllib.request.urlopen", fake_urlopen),
+            patch("sys.stdout"),
+        ):
+            exit_code = run(["--task-id", "abc123", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(any("/comment" in url for url in urls))
+
+    def test_comment_fetch_failure_keeps_task_read_successful(self) -> None:
+        import urllib.error
+
+        task_payload = {
+            "id": "abc123",
+            "name": "Task",
+            "status": {"status": "open"},
+            "description": "Body",
+            "tags": [],
+            "custom_fields": [],
+        }
+
+        class FakeResponse:
+            def __init__(self, body: dict) -> None:
+                self._body = body
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps(self._body).encode("utf-8")
+
+        def fake_urlopen(request: object, timeout: int = 0) -> FakeResponse:
+            if "/comment" in request.full_url:
+                raise urllib.error.URLError("offline")
+            if request.full_url.endswith("/time"):
+                return FakeResponse({"data": []})
+            return FakeResponse(task_payload)
+
+        with (
+            patch("clickup_tools.read_task.get_api_token", return_value="pk_test"),
+            patch("clickup_tools.read_task.get_env_value", return_value=""),
+            patch("urllib.request.urlopen", fake_urlopen),
+            patch("sys.stdout") as stdout,
+        ):
+            exit_code = run(["--task-id", "abc123", "--json", "--include-comments"])
+
+        self.assertEqual(exit_code, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        data = json.loads(output)
+        self.assertEqual(data["comments"], [])
+        self.assertEqual(data["comments_note"], "Unavailable (network error: offline)")
 
     def test_run_reads_task_id_from_env_when_not_provided(self) -> None:
         task_payload = {
