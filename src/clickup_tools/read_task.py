@@ -69,6 +69,26 @@ class Subtask:
 
 
 @dataclass(frozen=True)
+class ChecklistItem:
+    """A task checklist item."""
+
+    item_id: str
+    name: str
+    resolved: bool
+    parent: str | None
+    children: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Checklist:
+    """A task checklist with its ordered items."""
+
+    checklist_id: str
+    name: str
+    items: list[ChecklistItem] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class TaskDetails:
     """Selected task fields for display."""
 
@@ -83,6 +103,7 @@ class TaskDetails:
     time_entries: list[TimeEntry] = field(default_factory=list)
     time_entries_note: str = ""
     subtasks: list[Subtask] = field(default_factory=list)
+    checklists: list[Checklist] = field(default_factory=list)
     comments: list[Comment] = field(default_factory=list)
     comments_included: bool = False
     comments_note: str = ""
@@ -194,6 +215,7 @@ def extract_task_details(task: dict[str, Any], *, outcome_field_id: str = "") ->
         outcome_available=outcome_available,
         outcome=outcome,
         subtasks=extract_subtasks(task),
+        checklists=extract_checklists(task),
     )
 
 
@@ -303,6 +325,44 @@ def fetch_child_subtasks(task_id: str, api_token: str) -> list[dict[str, Any]]:
     task = _request_json(url, api_token)
     raw = task.get("subtasks")
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def _ordered_records(value: Any) -> list[dict[str, Any]]:
+    """Keep response order unless ClickUp supplies numeric order indexes."""
+    if not isinstance(value, list):
+        return []
+    records = [item for item in value if isinstance(item, dict)]
+
+    def order(record: dict[str, Any]) -> float:
+        try:
+            return float(record.get("orderindex"))
+        except (TypeError, ValueError):
+            return float("inf")
+
+    return sorted(records, key=order)
+
+
+def extract_checklists(task: dict[str, Any]) -> list[Checklist]:
+    """Extract checklists and flat parent-linked items from Get Task."""
+    checklists: list[Checklist] = []
+    for record in _ordered_records(task.get("checklists")):
+        items = []
+        for item in _ordered_records(record.get("items")):
+            raw_children = item.get("children")
+            children = [string_value(child) for child in raw_children if string_value(child)] if isinstance(raw_children, list) else []
+            items.append(ChecklistItem(
+                item_id=string_value(item.get("id")),
+                name=string_value(item.get("name")) or "Untitled",
+                resolved=item.get("resolved") is True,
+                parent=string_value(item.get("parent")) or None,
+                children=children,
+            ))
+        checklists.append(Checklist(
+            checklist_id=string_value(record.get("id")),
+            name=string_value(record.get("name")) or "Untitled",
+            items=items,
+        ))
+    return checklists
 
 
 def extract_subtasks(task: dict[str, Any]) -> list[Subtask]:
@@ -615,6 +675,11 @@ def render_task_details(details: TaskDetails) -> str:
     lines.append(f"Subtasks: {total}")
     lines.extend(render_subtask_lines(details.subtasks))
 
+    lines.append(f"Checklists: {len(details.checklists)}")
+    for checklist in details.checklists:
+        lines.append(f"  {checklist.name}")
+        lines.extend(render_checklist_items(checklist.items))
+
     if details.comments_included:
         lines.append(f"Comments: {len(details.comments)}")
         if details.comments:
@@ -624,6 +689,31 @@ def render_task_details(details: TaskDetails) -> str:
         else:
             lines.append(f"  {details.comments_note or 'None'}")
     return "\n".join(lines)
+
+
+def render_checklist_items(items: list[ChecklistItem]) -> list[str]:
+    """Render parent-linked items without losing or repeating malformed links."""
+    by_id = {item.item_id: item for item in items if item.item_id}
+    rendered: set[int] = set()
+    lines: list[str] = []
+
+    def render(item: ChecklistItem, depth: int) -> None:
+        index = id(item)
+        if index in rendered:
+            return
+        rendered.add(index)
+        marker = "x" if item.resolved else " "
+        lines.append(f"{'  ' * depth}[{marker}] {item.name}")
+        for child in items:
+            if child.parent == item.item_id and item.item_id and child is not item:
+                render(child, depth + 1)
+
+    for item in items:
+        if not item.parent or item.parent not in by_id:
+            render(item, 2)
+    for item in items:
+        render(item, 2)
+    return lines
 
 
 def count_subtasks(subtasks: list[Subtask]) -> int:
@@ -652,6 +742,23 @@ def details_to_dict(details: TaskDetails, *, url: str = "") -> dict[str, Any]:
         "tracked_time": details.time_tracked,
         "tags": list(details.tags),
         "outcome": details.outcome if details.outcome_available else None,
+        "checklists": [
+            {
+                "id": checklist.checklist_id,
+                "name": checklist.name,
+                "items": [
+                    {
+                        "id": item.item_id,
+                        "name": item.name,
+                        "resolved": item.resolved,
+                        "parent": item.parent,
+                        "children": list(item.children),
+                    }
+                    for item in checklist.items
+                ],
+            }
+            for checklist in details.checklists
+        ],
         "time_entries": [
             {
                 "user": entry.user,

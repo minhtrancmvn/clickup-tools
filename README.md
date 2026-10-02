@@ -216,7 +216,8 @@ any tags on that entry, using the ClickUp tracked-time endpoint (all users, all
 intervals), plus the full subtask tree (each with ID, name, and status). Subtasks
 are fetched recursively — ClickUp returns only one level per request, so each
 child is fetched in turn until the tree is exhausted (capped at 10 levels deep,
-with a cycle guard).
+with a cycle guard). Task checklists and their completed or open items are
+included from the task response, without a separate request.
 
 ```sh
 ./clickup-read-task.py --task-id OOLE-523
@@ -247,11 +248,14 @@ Include up to 20 recent comments with `--include-comments`. Use
 The JSON object has these keys: `title`, `status`, `description`,
 `time_estimate`, `tracked_time`, `tags`, `outcome` (`null` when absent),
 `time_entries` (each with `user`, `date`, `duration`, `start_ms`, `tags`),
-`has_subtasks`, `subtask_count` (total across the whole tree), `subtasks` (each
-with `task_id`, `custom_id`, `name`, `status`, and a nested `subtasks` list),
-and `url`. When comments are requested, it also includes `comments` (each with
-`id`, `user`, `date`, `date_ms`, `text`, and `resolved`). A comment API failure
-adds `comments_note` without failing the task read.
+`checklists` (each with `id`, `name`, and `items`; each item has `id`, `name`,
+`resolved`, `parent`, and `children` IDs), `has_subtasks`, `subtask_count`
+(total across the whole tree), `subtasks` (each with `task_id`, `custom_id`,
+`name`, `status`, and a nested `subtasks` list), and `url`. `checklists` is an
+empty array when no checklists exist. When comments are requested, it also
+includes `comments` (each with `id`, `user`, `date`, `date_ms`, `text`, and
+`resolved`). A comment API failure adds `comments_note` without failing the
+task read.
 
 For custom task IDs such as `OOLE-523`, set `CLICKUP_TEAM_ID` in `.env`, pass
 `--team-id`, or use a task URL that includes the team/workspace ID. Internal

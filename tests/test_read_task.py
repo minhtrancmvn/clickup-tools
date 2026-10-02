@@ -142,6 +142,98 @@ class ClickUpReadTaskTests(unittest.TestCase):
         self.assertIn("Tags: bug", rendered)
         self.assertIn("Outcome:\nShipped", rendered)
 
+    def test_extract_task_checklists_preserves_ids_completion_and_item_order(self) -> None:
+        details = extract_task_details(
+            {
+                "name": "Task",
+                "checklists": [
+                    {
+                        "id": "check-2",
+                        "name": "Release",
+                        "orderindex": 2,
+                        "items": [
+                            {
+                                "id": "item-2", "name": "Ship", "orderindex": 2,
+                                "resolved": False, "parent": "item-1", "children": [],
+                            },
+                            {
+                                "id": "item-1", "name": "Review", "orderindex": 1,
+                                "resolved": True, "parent": None, "children": ["item-2"],
+                            },
+                        ],
+                    },
+                    {"id": "check-1", "name": "Prepare", "orderindex": 1, "items": []},
+                ],
+            },
+            outcome_field_id="",
+        )
+
+        data = details_to_dict(details)
+        self.assertEqual([checklist["name"] for checklist in data["checklists"]], ["Prepare", "Release"])
+        self.assertEqual(data["checklists"][1], {
+            "id": "check-2",
+            "name": "Release",
+            "items": [
+                {
+                    "id": "item-1", "name": "Review", "resolved": True,
+                    "parent": None, "children": ["item-2"],
+                },
+                {
+                    "id": "item-2", "name": "Ship", "resolved": False,
+                    "parent": "item-1", "children": [],
+                },
+            ],
+        })
+
+    def test_render_task_checklists_shows_nested_completion(self) -> None:
+        details = extract_task_details(
+            {
+                "name": "Task",
+                "checklists": [{
+                    "id": "check-1",
+                    "name": "Release",
+                    "items": [
+                        {"id": "child", "name": "Ship", "resolved": False, "parent": "root"},
+                        {"id": "root", "name": "Review", "resolved": True, "parent": None},
+                    ],
+                }],
+            },
+            outcome_field_id="",
+        )
+
+        self.assertIn(
+            "Checklists: 1\n  Release\n    [x] Review\n      [ ] Ship",
+            render_task_details(details),
+        )
+
+    def test_render_task_checklists_keeps_items_with_missing_or_cyclic_parents(self) -> None:
+        details = extract_task_details(
+            {"checklists": [{"name": "Review", "items": [
+                {"id": "orphan", "name": "Orphan", "parent": "missing", "resolved": False},
+                {"id": "cycle-a", "name": "Cycle A", "parent": "cycle-b", "resolved": False},
+                {"id": "cycle-b", "name": "Cycle B", "parent": "cycle-a", "resolved": True},
+            ]}]},
+            outcome_field_id="",
+        )
+
+        rendered = render_task_details(details)
+        self.assertEqual(rendered.count("Orphan"), 1)
+        self.assertEqual(rendered.count("Cycle A"), 1)
+        self.assertEqual(rendered.count("Cycle B"), 1)
+
+    def test_task_checklists_default_to_empty_for_missing_or_malformed_payload(self) -> None:
+        cases = (
+            ({"name": "Task"}, []),
+            ({"name": "Task", "checklists": None}, []),
+            ({"name": "Task", "checklists": [None, {"name": "Empty", "items": "invalid"}]},
+             [{"id": "", "name": "Empty", "items": []}]),
+        )
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                details = extract_task_details(payload, outcome_field_id="")
+                self.assertEqual(details_to_dict(details)["checklists"], expected)
+                self.assertIn(f"Checklists: {len(expected)}", render_task_details(details))
+
     def test_comments_default_to_disabled(self) -> None:
         args = read_task_module.build_parser().parse_args([])
 
@@ -445,6 +537,9 @@ class ClickUpReadTaskTests(unittest.TestCase):
             "time_spent": 1_800_000,
             "tags": [],
             "custom_fields": [],
+            "checklists": [{"id": "check-1", "name": "Release", "items": [
+                {"id": "item-1", "name": "Review", "resolved": True, "parent": None}
+            ]}],
         }
         entries_payload = {
             "data": [
@@ -482,6 +577,11 @@ class ClickUpReadTaskTests(unittest.TestCase):
         output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
         data = json.loads(output)
         self.assertEqual(data["title"], "JSON Task")
+        self.assertEqual(data["checklists"], [{
+            "id": "check-1", "name": "Release", "items": [
+                {"id": "item-1", "name": "Review", "resolved": True, "parent": None, "children": []}
+            ],
+        }])
         self.assertEqual(data["time_entries"][0]["user"], "Alice")
 
     def test_run_fetches_task_and_prints_details(self) -> None:
@@ -660,6 +760,23 @@ class ClickUpReadTaskTests(unittest.TestCase):
 
         runner.assert_called_once_with(["--json", "--task-id", "OOLE-523", "--team-id", "1234567890"])
         self.assertEqual(result, "Success.\n")
+
+    def test_mcp_read_clickup_task_returns_checklist_items(self) -> None:
+        task = {"name": "Task", "checklists": [{"id": "c1", "name": "Launch", "items": [
+            {"id": "i1", "name": "Review", "resolved": True, "parent": None}
+        ]}]}
+        with (
+            patch("clickup_tools.read_task.get_api_token", return_value="pk_test"),
+            patch("clickup_tools.read_task.get_env_value", return_value=""),
+            patch("clickup_tools.read_task.get_task_with_subtasks", return_value=task),
+            patch("clickup_tools.read_task.get_time_entries", return_value=[]),
+        ):
+            result = read_clickup_task("abc123")
+
+        self.assertTrue(result.startswith("Success.\n"))
+        data = json.loads(result.removeprefix("Success.\n"))
+        self.assertEqual(data["checklists"][0]["items"][0]["name"], "Review")
+        self.assertTrue(data["checklists"][0]["items"][0]["resolved"])
 
     def test_mcp_read_clickup_task_passes_comment_options_to_runner(self) -> None:
         with patch("clickup_tools.mcp_server.run_read_task", return_value=0) as runner:

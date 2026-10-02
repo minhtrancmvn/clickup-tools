@@ -111,9 +111,9 @@ def read_clickup_task(
 
     Returns a JSON object with title, status, description, time estimate,
     tracked time, tags, the Outcome custom field, individual time entries
-    (user, date, duration), and the task URL. Call with include_comments=True
-    when recent discussion is needed; comments are omitted by default to keep
-    reads fast and output small.
+    (user, date, duration), checklists with item completion, and the task URL.
+    Call with include_comments=True when recent discussion is needed; comments
+    are omitted by default to keep reads fast and output small.
 
     When task_id is omitted, it is read from CLICKUP_TASK_ID in the environment
     or .env file. For custom task IDs, set CLICKUP_TEAM_ID in the environment or
