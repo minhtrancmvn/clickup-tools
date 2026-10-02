@@ -1,5 +1,9 @@
 # Project Instructions
 
+## Model Routing
+
+Use Opus as primary model for planning and synthesis. Delegate independent bounded work to Sonnet, mechanical research to Haiku, and use Fable only if architectural ambiguity warrants its cost. Verify all outputs.
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
@@ -11,6 +15,7 @@ This project is indexed by GitNexus as **clickup-tools** (646 symbols, 1171 rela
 
 - **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
 - **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
+- **MUST clean up agent-created worktrees after agents finish.** An agent is finished only after its task is complete and its changes are committed and pushed. Then remove its worktree immediately, run `git worktree prune`, and verify `git worktree list` contains no stale agent-created worktrees. Never remove active or user-created worktrees.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
 - When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
 - When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
