@@ -273,6 +273,26 @@ include_comments: Include recent comments when true (default: false)
 comment_limit: Maximum comments to include, from 1 to 25 (default: 20)
 ```
 
+### `clickup-send-telegram`
+
+Sends one Telegram message through a Telegram bot: an optional intro line (for example an `@username` tag), then one numbered line per task with the task ID linked to ClickUp and the task name. It reads `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and the optional `TELEGRAM_THREAD_ID` from the environment or `.env`.
+
+A bot can only message someone who has opened the bot and pressed Start. In a group, the bot (with privacy mode on) only sees commands addressed to it, so post `/start@your_bot` there. Then list the chats the bot can see to find the chat ID; forum topics the command was posted in are listed too:
+
+```sh
+./clickup-send-telegram.py chats
+```
+
+Preview the message without sending it, then send it:
+
+```sh
+./clickup-send-telegram.py send OOLE-546 OOLE-547 --intro "@developer" --dry-run
+./clickup-send-telegram.py send OOLE-546 OOLE-547 --intro "@developer"
+./clickup-send-telegram.py send OOLE-546 --chat-id 123456789 --thread-id 21
+```
+
+`--chat-id` overrides `TELEGRAM_CHAT_ID`. In a group with topics, `--thread-id` (or `TELEGRAM_THREAD_ID`) posts in that topic; without either, the message goes to General. A topic link such as `https://t.me/c/1234567890/21` ends in its topic ID (`21`). Custom task IDs need `CLICKUP_TEAM_ID` or `--team-id`, as with `clickup-read-task`. The bot token is never printed, and error messages leave out the request URL because it contains the token.
+
 ## Markdown Preparation
 
 Before uploading, the tool prepares the Markdown for ClickUp:
@@ -296,6 +316,11 @@ For local development, the scripts read `CLICKUP_API_TOKEN` and
 ```sh
 CLICKUP_API_TOKEN=pk_your_personal_api_token
 CLICKUP_TEAM_ID=your_team_id
+# Only for clickup-send-telegram:
+TELEGRAM_BOT_TOKEN=123456:your_bot_token
+TELEGRAM_CHAT_ID=123456789
+# Optional forum topic:
+TELEGRAM_THREAD_ID=21
 ```
 
 ## Project Layout
@@ -305,6 +330,7 @@ CLICKUP_TEAM_ID=your_team_id
 ├── clickup-update-page.py      # Compatibility wrapper for direct local use
 ├── clickup-update-task.py      # Compatibility wrapper for task descriptions
 ├── clickup-read-task.py        # Compatibility wrapper for reading task details
+├── clickup-send-telegram.py    # Compatibility wrapper for sending tasks to Telegram
 ├── pyproject.toml              # Package metadata and console script
 ├── src/clickup_tools/          # Importable Python package
 └── tests/                      # Standard-library unittest tests
