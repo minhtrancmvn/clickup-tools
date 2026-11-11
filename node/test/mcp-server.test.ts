@@ -75,6 +75,7 @@ describe("MCP protocol", () => {
     const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
 
     expect(Object.keys(byName).sort()).toEqual([
+      "add_clickup_comment",
       "pull_clickup_page",
       "pull_clickup_task",
       "read_clickup_task",

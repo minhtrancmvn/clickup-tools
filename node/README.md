@@ -14,7 +14,7 @@ For the MCP server, set both as environment variables in your MCP client's serve
 
 ## MCP setup
 
-The server speaks MCP over stdio and exposes five tools: `update_clickup_page`, `update_clickup_task`, `read_clickup_task`, `pull_clickup_page` and `pull_clickup_task`.
+The server speaks MCP over stdio and exposes six tools: `update_clickup_page`, `update_clickup_task`, `read_clickup_task`, `pull_clickup_page`, `pull_clickup_task` and `add_clickup_comment`.
 
 ### Claude Code
 
@@ -89,6 +89,7 @@ The first `npx` start downloads the package. To start faster, install it globall
 | `read_clickup_task` | `task_id` (falls back to `CLICKUP_TASK_ID`), `team_id`, `include_comments` (default `false`), `include_replies` (default `false`), `comment_limit` (1-100, default `20`) |
 | `pull_clickup_page` | `page_url` (required), `file_path` (omit to get the Markdown back), `overwrite` (default `false`) |
 | `pull_clickup_task` | `task_id` (falls back to `CLICKUP_TASK_ID`), `team_id`, `file_path` (omit to get the Markdown back), `overwrite` (default `false`) |
+| `add_clickup_comment` | `task_id`, `team_id`, `text` or `file_path` (Markdown), `notify_all` (default `false`) |
 
 Pass absolute Markdown paths to the update tools. `read_clickup_task` returns the same JSON document as `clickup-read-task --json`. Each tool returns text that starts with `Success.` or `Error (exit code N).` followed by the command output.
 
@@ -181,6 +182,31 @@ clickup-pull-task OOLE-523 > OOLE-523.md      # without -o, the Markdown goes to
 
 A pulled page has `clickup-page` (and `subtitle`) front matter, the page name as a `# heading`, then the content. A pulled task has `clickup-task-id` (plus `clickup-team-id` for custom IDs), `outcome`, `status`, `priority`, `points` and `time_estimate`, the task name as a `# heading`, then the Markdown description and one `## Checklist: Name` section per checklist. Start and due dates are left out because ClickUp doesn't report whether they include a time, so pushing them back could change them. An existing file is never replaced unless you pass `--force`.
 
+### `clickup-comment`
+
+Posts Markdown as a task comment, converted to ClickUp's rich-text comment format.
+
+```sh
+clickup-comment OOLE-523 --text 'Deployed to **staging**, see [the run](https://ci.example/1)'
+clickup-comment OOLE-523 --file update.md
+clickup-comment --file update.md      # task from the file's clickup-task-id
+```
+
+Supported: `**bold**`, `*italic*`, `` `code` ``, `[links](https://...)`, bulleted, numbered and `- [ ]` checklist items (indent to nest), and fenced code blocks. Headings are posted as bold lines; other Markdown is posted as plain text. The file's front matter is not posted. Text that starts with `-` needs the `--text=- item` form.
+
+### `clickup-send-chat`
+
+Like `clickup-send-telegram`, but posts to a ClickUp Chat channel: an optional intro, then one numbered line per task with the task ID linked.
+
+```sh
+clickup-send-chat channels                                   # list channel IDs
+clickup-send-chat send OOLE-546 OOLE-547 --intro '@dev please check' --dry-run
+clickup-send-chat send OOLE-546 OOLE-547 --intro '@dev please check'
+clickup-send-chat send OOLE-546 --channel-id CHANNEL_ID
+```
+
+It uses `CLICKUP_TEAM_ID` as the workspace and `CLICKUP_CHAT_CHANNEL_ID` as the default channel.
+
 ### `clickup-send-telegram`
 
 Sends one Telegram message through a bot: an optional intro line, then one numbered line per task, with the task ID linked to ClickUp.
@@ -205,6 +231,7 @@ A bot can only message someone who has opened it and pressed Start. In a group, 
 | `TELEGRAM_BOT_TOKEN` | `clickup-send-telegram` |
 | `TELEGRAM_CHAT_ID` | Default chat for `clickup-send-telegram send` |
 | `TELEGRAM_THREAD_ID` | Default forum topic; omit to post in General |
+| `CLICKUP_CHAT_CHANNEL_ID` | Default channel for `clickup-send-chat send` |
 | `CLICKUP_TOOLS_ENV_FILE` | Extra `.env` path to check (set by `--env-file`) |
 
 A variable set in the environment wins. Otherwise the file in `CLICKUP_TOOLS_ENV_FILE` is checked first, then `./.env`.
