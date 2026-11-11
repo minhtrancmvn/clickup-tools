@@ -1,0 +1,93 @@
+# CI and release for the npm package in node/.
+#
+# - Pull requests: typecheck, test and build on every supported Node major.
+# - Push to main (a merge): the same checks, then publish to npm when the
+#   version in node/package.json is not on the registry yet. Merges that do
+#   not bump the version run the checks and skip publishing.
+#
+# Publishing uses npm trusted publishing (OIDC): no npm token is stored in
+# GitHub. The npm package's trusted publisher must point at this repository
+# and this workflow file name (node-package.yml).
+name: Node package
+
+on:
+  pull_request:
+    paths:
+      - "node/**"
+      - ".github/workflows/node-package.yml"
+  push:
+    branches: [main]
+    paths:
+      - "node/**"
+      - ".github/workflows/node-package.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-package-${{ github.ref }}
+  # Cancel superseded PR runs, but never cancel a run on main mid-publish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    working-directory: node
+
+jobs:
+  test:
+    name: test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json declares "engines": { "node": ">=20" }.
+        node-version: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm pack --dry-run
+
+  publish:
+    name: publish to npm
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # OIDC token for npm trusted publishing
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # Trusted publishing needs Node 22.14+ and npm 11.5.1+.
+          node-version: 24
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+      - name: Check whether this version is already on npm
+        id: version
+        run: |
+          npm --version
+          spec="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
+          if npm view "$spec" version --prefer-online > /dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$spec is already on npm; bump node/package.json version to release."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Publishing $spec"
+          fi
+      - if: steps.version.outputs.publish == 'true'
+        run: npm ci
+      # prepublishOnly re-runs typecheck, tests and build before upload.
+      - if: steps.version.outputs.publish == 'true'
+        run: npm publish

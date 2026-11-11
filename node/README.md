@@ -189,6 +189,16 @@ npm test
 npm run build
 ```
 
+Pull requests that touch `node/` run typecheck, tests and build on Node 20, 22 and 24 in GitHub Actions.
+
+To release, bump the version and merge to `main`:
+
+```sh
+npm version patch --no-git-tag-version   # or minor / major
+```
+
+The workflow publishes to npm when the version in `package.json` is not on the registry yet; merges without a version bump skip publishing. Publishing uses npm trusted publishing, so no npm token is stored in GitHub.
+
 ## License
 
 MIT
