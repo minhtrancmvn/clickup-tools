@@ -149,8 +149,14 @@ export async function updatePage(
 }
 
 /** Fetch a ClickUp Doc page. */
-export async function getPage(workspaceId: string, docId: string, pageId: string, apiToken: string): Promise<unknown> {
-  const query = pyUrlencode({ content_format: "text/plain" });
+export async function getPage(
+  workspaceId: string,
+  docId: string,
+  pageId: string,
+  apiToken: string,
+  contentFormat: "text/plain" | "text/md" = "text/plain",
+): Promise<unknown> {
+  const query = pyUrlencode({ content_format: contentFormat });
   const url = `https://api.clickup.com/api/v3/workspaces/${workspaceId}/docs/${docId}/pages/${pageId}?${query}`;
   const body = await httpRequest(url, {
     headers: { Authorization: apiToken, Accept: "application/json" },
