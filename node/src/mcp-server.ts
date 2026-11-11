@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import { BufferedOutput, expandUser, parseCli, processOutput, stringOption, type CliSpec, type Output } from "./common.js";
 import { ENV_FILE_ENV_VAR } from "./env.js";
+import { runPullPage, runPullTask } from "./pull.js";
 import { run as runReadTask } from "./read-task.js";
 import { run as runPage } from "./update-page.js";
 import { run as runTask } from "./update-task.js";
@@ -19,9 +20,43 @@ export interface ToolRunners {
   updatePage: Runner;
   updateTask: Runner;
   readTask: Runner;
+  pullPage: Runner;
+  pullTask: Runner;
 }
 
-const defaultRunners: ToolRunners = { updatePage: runPage, updateTask: runTask, readTask: runReadTask };
+const defaultRunners: ToolRunners = {
+  updatePage: runPage,
+  updateTask: runTask,
+  readTask: runReadTask,
+  pullPage: runPullPage,
+  pullTask: runPullTask,
+};
+
+export function pullPageArgv({ page_url, file_path = "", overwrite = false }: { page_url: string; file_path?: string; overwrite?: boolean }): string[] {
+  const argv = [page_url];
+  if (file_path) argv.push("--output", file_path);
+  if (overwrite) argv.push("--force");
+  return argv;
+}
+
+export function pullTaskArgv({
+  task_id = "",
+  team_id = "",
+  file_path = "",
+  overwrite = false,
+}: {
+  task_id?: string;
+  team_id?: string;
+  file_path?: string;
+  overwrite?: boolean;
+}): string[] {
+  const argv: string[] = [];
+  if (task_id) argv.push(task_id);
+  if (team_id) argv.push("--team-id", team_id);
+  if (file_path) argv.push("--output", file_path);
+  if (overwrite) argv.push("--force");
+  return argv;
+}
 
 export function packageVersion(): string {
   const manifest = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -118,16 +153,27 @@ By default, the markdown file must contain a frontmatter entry pointing at the t
     clickup-task-id: OOLE-523
     ---
 
-For custom task IDs, set CLICKUP_TEAM_ID in the environment or .env file. The optional task_id and team_id args override frontmatter/environment values. Local Markdown image and file links are uploaded as task attachments, then rewritten to ClickUp attachment URLs.`;
+For custom task IDs, set CLICKUP_TEAM_ID in the environment or .env file. The optional task_id and team_id args override frontmatter/environment values. Local Markdown image and file links are uploaded as task attachments (a file already attached with the same name and size is reused), then rewritten to ClickUp attachment URLs.
+
+Front matter can also set task fields: status, priority (urgent/high/normal/low/none or 1-4), points, time_estimate ("1h 30m"), start_date and due_date ("2026-11-20", "2026-11-20 14:00" local time, or an ISO timestamp with a zone), and outcome (the Outcome custom field).`;
+
+const PULL_PAGE_DESCRIPTION = `Save a ClickUp Doc page as Markdown that update_clickup_page can push back.
+
+The result starts with clickup-page front matter (and subtitle when the page has one), then the page name as a # heading, then the page content. With file_path, the Markdown is written to that file (refused if it exists unless overwrite=true) and the tool reports the path; without file_path, the Markdown is returned. Edit the file and call update_clickup_page with it to push changes.`;
+
+const PULL_TASK_DESCRIPTION = `Save a ClickUp task as Markdown that update_clickup_task can push back.
+
+The result starts with front matter (clickup-task-id, clickup-team-id for custom IDs, outcome, status, priority, points, time_estimate), then the task name as a # heading, then the Markdown description. Start and due dates are not written because ClickUp does not report whether they include a time. With file_path, the Markdown is written to that file (refused if it exists unless overwrite=true); without file_path, it is returned. When task_id is omitted, CLICKUP_TASK_ID is used.`;
 
 const READ_TASK_DESCRIPTION = `Read selected details from a ClickUp task as a JSON document.
 
-Returns a JSON object with title, status, description, time estimate, tracked time, tags, the Outcome custom field, individual time entries (user, date, duration), checklists with item completion, nested subtasks, and the task URL. The description is returned as Markdown. Call with include_comments=true when recent discussion is needed (each comment has a reply_count); add include_replies=true to also return threaded replies. Comments are omitted by default to keep reads fast and output small. If subtasks_incomplete is true, part of the subtask tree could not be loaded (see subtasks_note).
+Returns a JSON object with title, status, description, time estimate, tracked time, tags, the Outcome custom field, assignees, priority, start/due dates, points, parent task, List, dependencies (waiting_on / blocking), linked tasks, attachments, time in each status (null when the Time in Status ClickApp is off), individual time entries (user, date, duration), checklists with item completion, nested subtasks, and the task URL. The description is returned as Markdown. Call with include_comments=true when recent discussion is needed (each comment has a reply_count); add include_replies=true to also return threaded replies. Comments are omitted by default to keep reads fast and output small. If subtasks_incomplete is true, part of the subtask tree could not be loaded (see subtasks_note).
 
 When task_id is omitted, it is read from CLICKUP_TASK_ID in the environment or .env file. For custom task IDs, set CLICKUP_TEAM_ID in the environment or .env file. The optional team_id arg overrides the environment value.`;
 
 /** Build the MCP server with all ClickUp tools registered. */
-export function createServer(runners: ToolRunners = defaultRunners): McpServer {
+export function createServer(overrides: Partial<ToolRunners> = {}): McpServer {
+  const runners: ToolRunners = { ...defaultRunners, ...overrides };
   const server = new McpServer({ name: "clickup-tools", version: packageVersion() });
 
   server.registerTool(
@@ -180,6 +226,42 @@ export function createServer(runners: ToolRunners = defaultRunners): McpServer {
       annotations: { readOnlyHint: true },
     },
     async (args) => callRunner(runners.readTask, readTaskArgv(args)),
+  );
+
+  const fileArgs = {
+    file_path: z
+      .string()
+      .default("")
+      .describe("Optional path of the Markdown file to write. When omitted, the Markdown is returned instead."),
+    overwrite: z.boolean().default(false).describe("Replace file_path if it already exists. Defaults to false."),
+  };
+
+  server.registerTool(
+    "pull_clickup_page",
+    {
+      description: PULL_PAGE_DESCRIPTION,
+      inputSchema: {
+        page_url: z.string().describe("ClickUp Doc page URL, e.g. https://app.clickup.com/<workspace>/v/dc/<doc>/<page>."),
+        ...fileArgs,
+      },
+    },
+    async (args) => callRunner(runners.pullPage, pullPageArgv(args)),
+  );
+
+  server.registerTool(
+    "pull_clickup_task",
+    {
+      description: PULL_TASK_DESCRIPTION,
+      inputSchema: {
+        task_id: z
+          .string()
+          .default("")
+          .describe("Optional ClickUp task ID, custom task ID, or task URL. Falls back to CLICKUP_TASK_ID when omitted."),
+        team_id: z.string().default("").describe("Optional ClickUp team/workspace ID for custom task IDs."),
+        ...fileArgs,
+      },
+    },
+    async (args) => callRunner(runners.pullTask, pullTaskArgv(args)),
   );
 
   return server;

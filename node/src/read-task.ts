@@ -119,6 +119,36 @@ export interface TaskDetails {
   commentsIncluded: boolean;
   repliesIncluded: boolean;
   commentsNote: string;
+  assignees: string[];
+  /** Priority name (urgent, high, normal, low), or "" when not set. */
+  priority: string;
+  startDateMs: number | null;
+  dueDateMs: number | null;
+  points: number | null;
+  /** Parent task ID when this task is a subtask, else "". */
+  parent: string;
+  list: { id: string; name: string } | null;
+  /** Tasks this task waits on (it depends on them). */
+  waitingOn: string[];
+  /** Tasks waiting on this task. */
+  blocking: string[];
+  linkedTasks: string[];
+  attachments: TaskAttachment[];
+  timeInStatus: TimeInStatus | null;
+  timeInStatusNote: string;
+}
+
+/** A file attached to the task. */
+export interface TaskAttachment {
+  title: string;
+  url: string;
+  size: number | null;
+}
+
+/** Minutes spent in each status, from the Time in Status ClickApp. */
+export interface TimeInStatus {
+  current: { status: string; minutes: number; sinceMs: number | null } | null;
+  history: { status: string; minutes: number }[];
 }
 
 export const PROG = "clickup-read-task";
@@ -282,7 +312,96 @@ export function extractTaskDetails(task: unknown, { outcomeFieldId = "" }: { out
     commentsIncluded: false,
     repliesIncluded: false,
     commentsNote: "",
+    assignees: Array.isArray(record.assignees) ? record.assignees.filter(isDict).map(extractEntryUser) : [],
+    priority: isDict(record.priority) ? stringValue(record.priority.priority) : "",
+    startDateMs: parseEpochMs(record.start_date),
+    dueDateMs: parseEpochMs(record.due_date),
+    points: typeof record.points === "number" ? record.points : pyFloat(record.points),
+    parent: stringValue(record.parent),
+    list: isDict(record.list) ? { id: stringValue(record.list.id), name: stringValue(record.list.name) } : null,
+    ...extractDependencies(record),
+    linkedTasks: extractLinkedTasks(record),
+    attachments: extractAttachments(record),
+    timeInStatus: null,
+    timeInStatusNote: "",
   };
+}
+
+/** Split dependency records into tasks this one waits on and tasks waiting on it. */
+export function extractDependencies(task: Json): { waitingOn: string[]; blocking: string[] } {
+  const self = stringValue(task.id);
+  const waitingOn: string[] = [];
+  const blocking: string[] = [];
+  for (const dependency of Array.isArray(task.dependencies) ? task.dependencies.filter(isDict) : []) {
+    const from = stringValue(dependency.task_id);
+    const to = stringValue(dependency.depends_on);
+    if (from === self && to && !waitingOn.includes(to)) waitingOn.push(to);
+    else if (to === self && from && !blocking.includes(from)) blocking.push(from);
+  }
+  return { waitingOn, blocking };
+}
+
+/** IDs of tasks linked to this one (the other side of each link). */
+export function extractLinkedTasks(task: Json): string[] {
+  const self = stringValue(task.id);
+  const linked: string[] = [];
+  for (const link of Array.isArray(task.linked_tasks) ? task.linked_tasks.filter(isDict) : []) {
+    const a = stringValue(link.task_id);
+    const b = stringValue(link.link_id);
+    const other = a === self ? b : b === self ? a : a || b;
+    if (other && other !== self && !linked.includes(other)) linked.push(other);
+  }
+  return linked;
+}
+
+/** Non-deleted attachments with their file name, URL and size. */
+export function extractAttachments(task: Json): TaskAttachment[] {
+  const attachments = Array.isArray(task.attachments) ? task.attachments.filter(isDict) : [];
+  return attachments
+    .filter((attachment) => attachment.deleted !== true)
+    .map((attachment) => ({
+      title: stringValue(attachment.title) || "Untitled",
+      url: stringValue(attachment.url),
+      size: pyInt(attachment.size),
+    }));
+}
+
+/** Fetch minutes spent in each status (needs the Time in Status ClickApp). */
+export async function getTimeInStatus(destination: TaskDestination, apiToken: string): Promise<Json> {
+  const url = `https://api.clickup.com/api/v2/task/${destination.taskId}/time_in_status${taskQuery(destination)}`;
+  return asDict(await requestJson(url, apiToken));
+}
+
+/** Parse a Time in Status response; null when ClickUp has no data (ClickApp off). */
+export function extractTimeInStatus(payload: Json): TimeInStatus | null {
+  const minutes = (entry: Json): number => {
+    const total = isDict(entry.total_time) ? entry.total_time : {};
+    return Math.max(0, pyInt(total.by_minute) ?? 0);
+  };
+  const current = isDict(payload.current_status) && stringValue(payload.current_status.status) ? payload.current_status : null;
+  const history = (Array.isArray(payload.status_history) ? payload.status_history.filter(isDict) : [])
+    .filter((entry) => stringValue(entry.status))
+    .map((entry) => ({ status: stringValue(entry.status), minutes: minutes(entry) }));
+  if (!current && !history.length) return null;
+  return {
+    current: current
+      ? {
+          status: stringValue(current.status),
+          minutes: minutes(current),
+          sinceMs: isDict(current.total_time) ? parseEpochMs(current.total_time.since) : null,
+        }
+      : null,
+    history,
+  };
+}
+
+/** Format whole minutes as "2d 3h 15m", "45m" or "0m". */
+export function formatMinutes(total: number): string {
+  const days = Math.floor(total / 1440);
+  const hours = Math.floor((total % 1440) / 60);
+  const minutes = total % 60;
+  const parts = [days ? `${days}d` : "", hours ? `${hours}h` : "", minutes || (!days && !hours) ? `${minutes}m` : ""];
+  return parts.filter(Boolean).join(" ");
 }
 
 /** Extract a task status label. */
@@ -704,6 +823,34 @@ export function renderTaskDetails(details: TaskDetails): string {
   if (details.outcomeAvailable) {
     lines.push("Outcome:", details.outcome);
   }
+  lines.push(
+    `Assignees: ${details.assignees.length ? details.assignees.join(", ") : "None"}`,
+    `Priority: ${details.priority || "Not set"}`,
+    `Start date: ${details.startDateMs === null ? "Not set" : formatEpochMs(details.startDateMs)}`,
+    `Due date: ${details.dueDateMs === null ? "Not set" : formatEpochMs(details.dueDateMs)}`,
+    `Points: ${details.points === null ? "Not set" : pyStr(details.points)}`,
+  );
+  if (details.list) lines.push(`List: ${details.list.name || "Untitled"} (${details.list.id})`);
+  if (details.parent) lines.push(`Parent task: ${details.parent}`);
+  if (details.waitingOn.length) lines.push(`Waiting on: ${details.waitingOn.join(", ")}`);
+  if (details.blocking.length) lines.push(`Blocking: ${details.blocking.join(", ")}`);
+  if (details.linkedTasks.length) lines.push(`Linked tasks: ${details.linkedTasks.join(", ")}`);
+  lines.push(`Attachments: ${details.attachments.length}`);
+  for (const attachment of details.attachments) {
+    lines.push(`  - ${attachment.title}  ${attachment.url}`);
+  }
+  if (details.timeInStatus) {
+    lines.push("Time in status:");
+    if (details.timeInStatus.current) {
+      lines.push(`  - ${details.timeInStatus.current.status}  ${formatMinutes(details.timeInStatus.current.minutes)}  (current)`);
+    }
+    for (const entry of details.timeInStatus.history) {
+      if (details.timeInStatus.current && entry.status === details.timeInStatus.current.status) continue;
+      lines.push(`  - ${entry.status}  ${formatMinutes(entry.minutes)}`);
+    }
+  } else if (details.timeInStatusNote) {
+    lines.push(`Time in status: ${details.timeInStatusNote}`);
+  }
 
   lines.push("Time entries:");
   if (details.timeEntries.length) {
@@ -797,6 +944,30 @@ export function detailsToDict(details: TaskDetails, { url = "" }: { url?: string
     tracked_time: details.timeTracked,
     tags: [...details.tags],
     outcome: details.outcomeAvailable ? details.outcome : null,
+    assignees: [...details.assignees],
+    priority: details.priority || null,
+    start_date: details.startDateMs === null ? null : formatEpochMs(details.startDateMs),
+    start_date_ms: details.startDateMs,
+    due_date: details.dueDateMs === null ? null : formatEpochMs(details.dueDateMs),
+    due_date_ms: details.dueDateMs,
+    points: details.points,
+    parent: details.parent || null,
+    list: details.list ? { ...details.list } : null,
+    dependencies: { waiting_on: [...details.waitingOn], blocking: [...details.blocking] },
+    linked_tasks: [...details.linkedTasks],
+    attachments: details.attachments.map((attachment) => ({ ...attachment })),
+    time_in_status: details.timeInStatus
+      ? {
+          current: details.timeInStatus.current
+            ? {
+                status: details.timeInStatus.current.status,
+                minutes: details.timeInStatus.current.minutes,
+                since_ms: details.timeInStatus.current.sinceMs,
+              }
+            : null,
+          history: details.timeInStatus.history.map((entry) => ({ ...entry })),
+        }
+      : null,
     checklists: details.checklists.map((checklist) => ({
       id: checklist.checklistId,
       name: checklist.name,
@@ -818,6 +989,9 @@ export function detailsToDict(details: TaskDetails, { url = "" }: { url?: string
   };
   if (!details.timeEntries.length && details.timeEntriesNote) {
     data.time_entries_note = details.timeEntriesNote;
+  }
+  if (!details.timeInStatus && details.timeInStatusNote) {
+    data.time_in_status_note = details.timeInStatusNote;
   }
   data.has_subtasks = details.subtasks.length > 0;
   data.subtask_count = countSubtasks(details.subtasks);
@@ -943,6 +1117,13 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
     details = { ...details, timeEntries: extractTimeEntries(rawRecords) };
   } catch (error) {
     details = { ...details, timeEntriesNote: unavailableNote(error) };
+  }
+
+  try {
+    details = { ...details, timeInStatus: extractTimeInStatus(await getTimeInStatus(destination, apiToken)) };
+  } catch (error) {
+    if (!(error instanceof HttpError || error instanceof NetworkError)) throw error;
+    details = { ...details, timeInStatusNote: unavailableNote(error) };
   }
 
   if (args.includeComments) {

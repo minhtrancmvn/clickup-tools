@@ -14,7 +14,7 @@ For the MCP server, set both as environment variables in your MCP client's serve
 
 ## MCP setup
 
-The server speaks MCP over stdio and exposes three tools: `update_clickup_page`, `update_clickup_task` and `read_clickup_task`.
+The server speaks MCP over stdio and exposes five tools: `update_clickup_page`, `update_clickup_task`, `read_clickup_task`, `pull_clickup_page` and `pull_clickup_task`.
 
 ### Claude Code
 
@@ -87,6 +87,8 @@ The first `npx` start downloads the package. To start faster, install it globall
 | `update_clickup_page` | `file_path` (required), `no_open` (default `true`), `allow_local_media` (default `false`) |
 | `update_clickup_task` | `file_path` (required), `task_id`, `team_id`, `no_rich_links` (default `false`) |
 | `read_clickup_task` | `task_id` (falls back to `CLICKUP_TASK_ID`), `team_id`, `include_comments` (default `false`), `include_replies` (default `false`), `comment_limit` (1-100, default `20`) |
+| `pull_clickup_page` | `page_url` (required), `file_path` (omit to get the Markdown back), `overwrite` (default `false`) |
+| `pull_clickup_task` | `task_id` (falls back to `CLICKUP_TASK_ID`), `team_id`, `file_path` (omit to get the Markdown back), `overwrite` (default `false`) |
 
 Pass absolute Markdown paths to the update tools. `read_clickup_task` returns the same JSON document as `clickup-read-task --json`. Each tool returns text that starts with `Success.` or `Error (exit code N).` followed by the command output.
 
@@ -139,7 +141,7 @@ Front matter can also set task fields: `status`, `priority` (`urgent`, `high`, `
 
 ### `clickup-read-task`
 
-Prints the title, status, description (as Markdown), time estimate, tracked time, tags, the `Outcome` custom field, time entries, checklists and the full subtask tree. Subtasks are fetched recursively, up to 10 levels deep; if part of the tree can't be loaded, the affected subtask says so instead of silently showing no children.
+Prints the title, status, description (as Markdown), time estimate, tracked time, tags, the `Outcome` custom field, assignees, priority, start and due dates, points, List, parent task, dependencies, linked tasks, attachments, time in each status (when the Time in Status ClickApp is on), time entries, checklists and the full subtask tree. Subtasks are fetched recursively, up to 10 levels deep; if part of the tree can't be loaded, the affected subtask says so instead of silently showing no children.
 
 ```sh
 clickup-read-task OOLE-523
@@ -149,7 +151,19 @@ clickup-read-task --task-id OOLE-523 --json --include-comments --comment-limit 1
 clickup-read-task --task-id OOLE-523 --json --include-replies
 ```
 
-With no task given, it reads `CLICKUP_TASK_ID`. `--json` prints a single JSON object with `title`, `status`, `description`, `time_estimate`, `tracked_time`, `tags`, `outcome`, `checklists`, `time_entries`, `has_subtasks`, `subtask_count`, `subtasks`, `url` and, with `--include-comments`, `comments`. Each comment has a `reply_count`; `--include-replies` also returns each comment's threaded `replies`. `--comment-limit` accepts 1-100 (ClickUp returns 25 per page, so larger limits make more requests). When part of the subtask tree failed to load, the object has `subtasks_incomplete: true` and the affected subtask a `subtasks_note`.
+With no task given, it reads `CLICKUP_TASK_ID`. `--json` prints a single JSON object with `title`, `status`, `description`, `time_estimate`, `tracked_time`, `tags`, `outcome`, `assignees`, `priority`, `start_date` / `start_date_ms`, `due_date` / `due_date_ms`, `points`, `parent`, `list`, `dependencies` (`waiting_on`, `blocking`), `linked_tasks`, `attachments`, `time_in_status`, `checklists`, `time_entries`, `has_subtasks`, `subtask_count`, `subtasks`, `url` and, with `--include-comments`, `comments`. Each comment has a `reply_count`; `--include-replies` also returns each comment's threaded `replies`. `--comment-limit` accepts 1-100 (ClickUp returns 25 per page, so larger limits make more requests). When part of the subtask tree failed to load, the object has `subtasks_incomplete: true` and the affected subtask a `subtasks_note`.
+
+### `clickup-pull-page` and `clickup-pull-task`
+
+Save a Doc page or a task as a Markdown file you can edit and push back with `clickup-update-page` / `clickup-update-task`.
+
+```sh
+clickup-pull-page 'https://app.clickup.com/123/v/dc/doc-id/page-id' -o spec.md
+clickup-pull-task OOLE-523 -o OOLE-523.md
+clickup-pull-task OOLE-523 > OOLE-523.md      # without -o, the Markdown goes to standard output
+```
+
+A pulled page has `clickup-page` (and `subtitle`) front matter, the page name as a `# heading`, then the content. A pulled task has `clickup-task-id` (plus `clickup-team-id` for custom IDs), `outcome`, `status`, `priority`, `points` and `time_estimate`, the task name as a `# heading`, then the Markdown description. Start and due dates are left out because ClickUp doesn't report whether they include a time, so pushing them back could change them. An existing file is never replaced unless you pass `--force`.
 
 ### `clickup-send-telegram`
 

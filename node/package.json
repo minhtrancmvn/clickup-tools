@@ -23,7 +23,9 @@
     "clickup-update-page": "dist/bin/clickup-update-page.js",
     "clickup-update-task": "dist/bin/clickup-update-task.js",
     "clickup-read-task": "dist/bin/clickup-read-task.js",
-    "clickup-send-telegram": "dist/bin/clickup-send-telegram.js"
+    "clickup-send-telegram": "dist/bin/clickup-send-telegram.js",
+    "clickup-pull-page": "dist/bin/clickup-pull-page.js",
+    "clickup-pull-task": "dist/bin/clickup-pull-task.js"
   },
   "files": [
     "dist",

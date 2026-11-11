@@ -17,7 +17,7 @@ import {
 } from "../src/mcp-server.js";
 import { FIXTURES, jsonResponse, stubFetch } from "./helpers.js";
 
-async function connect(runners?: ToolRunners): Promise<Client> {
+async function connect(runners?: Partial<ToolRunners>): Promise<Client> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await createServer(runners).connect(serverTransport);
   const client = new Client({ name: "test-client", version: "0.0.0" });
@@ -67,14 +67,22 @@ describe("argv builders (mirror mcp_server.py)", () => {
 });
 
 describe("MCP protocol", () => {
-  it("lists_the_three_tools_with_python_compatible_schemas", async () => {
+  it("lists_all_tools_with_their_schemas", async () => {
     const client = await connect();
 
     expect(client.getServerVersion()).toMatchObject({ name: "clickup-tools", version: packageVersion() });
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
 
-    expect(Object.keys(byName).sort()).toEqual(["read_clickup_task", "update_clickup_page", "update_clickup_task"]);
+    expect(Object.keys(byName).sort()).toEqual([
+      "pull_clickup_page",
+      "pull_clickup_task",
+      "read_clickup_task",
+      "update_clickup_page",
+      "update_clickup_task",
+    ]);
+    expect(byName.pull_clickup_page!.inputSchema.required).toEqual(["page_url"]);
+    expect(byName.pull_clickup_task!.inputSchema.required ?? []).toEqual([]);
     expect(byName.update_clickup_page!.inputSchema.required).toEqual(["file_path"]);
     expect(byName.update_clickup_task!.inputSchema.required).toEqual(["file_path"]);
     expect(byName.read_clickup_task!.inputSchema.required ?? []).toEqual([]);
@@ -122,6 +130,7 @@ describe("MCP protocol", () => {
     expect(calls.map((call) => call.url)).toEqual([
       "https://api.clickup.com/api/v2/task/abc123?include_subtasks=true&include_markdown_description=true",
       "https://api.clickup.com/api/v2/task/abc123/time",
+      "https://api.clickup.com/api/v2/task/abc123/time_in_status",
     ]);
     await client.close();
   });
