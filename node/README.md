@@ -8,36 +8,43 @@ Requires Node.js 20 or newer.
 
 ## Credentials
 
-Put your ClickUp credentials in a `.env` file:
+The tools need a ClickUp personal API token, which you can create at https://app.clickup.com/settings/apps. `CLICKUP_TEAM_ID` is also needed for custom task IDs such as `OOLE-523`; internal task IDs work without it.
 
-```sh
-CLICKUP_API_TOKEN=pk_your_personal_api_token
-CLICKUP_TEAM_ID=your_team_id
-```
-
-Get a personal API token at https://app.clickup.com/settings/apps. `CLICKUP_TEAM_ID` is needed for custom task IDs such as `OOLE-523`; internal task IDs work without it.
+For the MCP server, set both as environment variables in your MCP client's server config, as shown below; no `.env` file is needed. For the command-line tools, export them in your shell or put them in a `.env` file in the working directory.
 
 ## MCP setup
 
-The server speaks MCP over stdio and exposes three tools: `update_clickup_page`, `update_clickup_task` and `read_clickup_task`. Point it at your `.env` with `--env-file`.
+The server speaks MCP over stdio and exposes three tools: `update_clickup_page`, `update_clickup_task` and `read_clickup_task`.
 
 ### Claude Code
 
 ```sh
-claude mcp add clickup-tools -- npx -y @kaishj91/clickup-tools-mcp --env-file /absolute/path/to/.env
+claude mcp add clickup-tools -s user \
+  -e CLICKUP_API_TOKEN=pk_your_personal_api_token \
+  -e CLICKUP_TEAM_ID=your_team_id \
+  -- npx -y @kaishj91/clickup-tools-mcp
 ```
+
+`-s user` keeps the server, token included, in your own Claude Code config. Avoid `-s project`, which writes the token into `.mcp.json` in the repository.
 
 ### VS Code / GitHub Copilot
 
-`.vscode/mcp.json`:
+`.vscode/mcp.json`. VS Code asks for the token when the server first starts, so the file holds no secret and is safe to commit:
 
 ```json
 {
+  "inputs": [
+    { "type": "promptString", "id": "clickup-token", "description": "ClickUp API token", "password": true }
+  ],
   "servers": {
     "clickup-tools": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@kaishj91/clickup-tools-mcp", "--env-file", "${workspaceFolder}/.env"]
+      "args": ["-y", "@kaishj91/clickup-tools-mcp"],
+      "env": {
+        "CLICKUP_API_TOKEN": "${input:clickup-token}",
+        "CLICKUP_TEAM_ID": "your_team_id"
+      }
     }
   }
 }
@@ -46,7 +53,10 @@ claude mcp add clickup-tools -- npx -y @kaishj91/clickup-tools-mcp --env-file /a
 ### Codex CLI
 
 ```sh
-codex mcp add clickup-tools -- npx -y @kaishj91/clickup-tools-mcp --env-file /absolute/path/to/.env
+codex mcp add clickup-tools \
+  --env CLICKUP_API_TOKEN=pk_your_personal_api_token \
+  --env CLICKUP_TEAM_ID=your_team_id \
+  -- npx -y @kaishj91/clickup-tools-mcp
 ```
 
 ### Claude Desktop and other clients
@@ -56,11 +66,17 @@ codex mcp add clickup-tools -- npx -y @kaishj91/clickup-tools-mcp --env-file /ab
   "mcpServers": {
     "clickup-tools": {
       "command": "npx",
-      "args": ["-y", "@kaishj91/clickup-tools-mcp", "--env-file", "/absolute/path/to/.env"]
+      "args": ["-y", "@kaishj91/clickup-tools-mcp"],
+      "env": {
+        "CLICKUP_API_TOKEN": "pk_your_personal_api_token",
+        "CLICKUP_TEAM_ID": "your_team_id"
+      }
     }
   }
 }
 ```
+
+Put credentials in `env`, not in `args`: command-line arguments show up in process listings such as `ps` for every user on the machine, and environment variables do not. To keep them in a file instead, leave out `env` and add `"--env-file", "/absolute/path/to/.env"` to `args`.
 
 The first `npx` start downloads the package. To start faster, install it globally with `npm install -g @kaishj91/clickup-tools-mcp` and use `clickup-tools-mcp` as the command.
 
