@@ -8,6 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { BufferedOutput, expandUser, parseCli, processOutput, stringOption, type CliSpec, type Output } from "./common.js";
+import { run as runComment } from "./comment.js";
 import { ENV_FILE_ENV_VAR } from "./env.js";
 import { runPullPage, runPullTask } from "./pull.js";
 import { run as runReadTask } from "./read-task.js";
@@ -22,6 +23,7 @@ export interface ToolRunners {
   readTask: Runner;
   pullPage: Runner;
   pullTask: Runner;
+  comment: Runner;
 }
 
 const defaultRunners: ToolRunners = {
@@ -30,7 +32,30 @@ const defaultRunners: ToolRunners = {
   readTask: runReadTask,
   pullPage: runPullPage,
   pullTask: runPullTask,
+  comment: runComment,
 };
+
+export function commentArgv({
+  task_id = "",
+  team_id = "",
+  text = "",
+  file_path = "",
+  notify_all = false,
+}: {
+  task_id?: string;
+  team_id?: string;
+  text?: string;
+  file_path?: string;
+  notify_all?: boolean;
+}): string[] {
+  const argv: string[] = [];
+  if (task_id) argv.push(task_id);
+  if (team_id) argv.push("--team-id", team_id);
+  if (file_path) argv.push("--file", file_path);
+  if (text) argv.push(`--text=${text}`);
+  if (notify_all) argv.push("--notify-all");
+  return argv;
+}
 
 export function pullPageArgv({ page_url, file_path = "", overwrite = false }: { page_url: string; file_path?: string; overwrite?: boolean }): string[] {
   const argv = [page_url];
@@ -163,7 +188,11 @@ To create a new task instead, use clickup-list: <List ID or URL> (and optionally
 
 Sections headed "## Checklist" or "## Checklist: Name" with "- [ ] item" / "- [x] item" lines (indent to nest) become ClickUp checklists on the task and are left out of the description. Checklists and items are matched by name; missing ones are created, item state and nesting are updated, and nothing is deleted.`;
 
-const PULL_PAGE_DESCRIPTION = `Save a ClickUp Doc page as Markdown that update_clickup_page can push back.
+const ADD_COMMENT_DESCRIPTION = `Post Markdown as a comment on a ClickUp task.
+
+Pass the Markdown as text, or file_path for a Markdown file (its front matter is not posted, and its clickup-task-id is used when task_id is omitted). The Markdown is converted to ClickUp's rich-text comment format: **bold**, *italic*, \`code\`, [links](https://...), bulleted, numbered and "- [ ]" checklist items (indent to nest), and fenced code blocks; headings are posted as bold lines.`;
+
+const PULL_PAGE_DESCRIPTION =`Save a ClickUp Doc page as Markdown that update_clickup_page can push back.
 
 The result starts with clickup-page front matter (and subtitle when the page has one), then the page name as a # heading, then the page content. With file_path, the Markdown is written to that file (refused if it exists unless overwrite=true) and the tool reports the path; without file_path, the Markdown is returned. Edit the file and call update_clickup_page with it to push changes.`;
 
@@ -268,6 +297,24 @@ export function createServer(overrides: Partial<ToolRunners> = {}): McpServer {
       },
     },
     async (args) => callRunner(runners.pullTask, pullTaskArgv(args)),
+  );
+
+  server.registerTool(
+    "add_clickup_comment",
+    {
+      description: ADD_COMMENT_DESCRIPTION,
+      inputSchema: {
+        task_id: z
+          .string()
+          .default("")
+          .describe("ClickUp task ID, custom task ID, or task URL. Falls back to the file's clickup-task-id, then CLICKUP_TASK_ID."),
+        team_id: z.string().default("").describe("Optional ClickUp team/workspace ID for custom task IDs."),
+        text: z.string().default("").describe("Markdown to post. Use either text or file_path."),
+        file_path: z.string().default("").describe("Markdown file to post (front matter is not posted). Use either text or file_path."),
+        notify_all: z.boolean().default(false).describe("Also notify yourself; assignees and watchers are always notified."),
+      },
+    },
+    async (args) => callRunner(runners.comment, commentArgv(args)),
   );
 
   return server;

@@ -1,6 +1,6 @@
 {
   "name": "@kaishj91/clickup-tools-mcp",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "MCP server and CLI tools for ClickUp: update Doc pages and task descriptions from Markdown, read task details, and post tasks to Telegram.",
   "keywords": [
     "mcp",
@@ -25,7 +25,9 @@
     "clickup-read-task": "dist/bin/clickup-read-task.js",
     "clickup-send-telegram": "dist/bin/clickup-send-telegram.js",
     "clickup-pull-page": "dist/bin/clickup-pull-page.js",
-    "clickup-pull-task": "dist/bin/clickup-pull-task.js"
+    "clickup-pull-task": "dist/bin/clickup-pull-task.js",
+    "clickup-comment": "dist/bin/clickup-comment.js",
+    "clickup-send-chat": "dist/bin/clickup-send-chat.js"
   },
   "files": [
     "dist",
