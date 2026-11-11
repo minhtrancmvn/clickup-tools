@@ -143,6 +143,8 @@ The markdown file must contain a frontmatter entry pointing at the page:
     clickup-page: https://app.clickup.com/<workspace>/v/dc/<doc>/<page>
     ---
 
+To create a new page instead, use clickup-doc: <Doc URL> (and optionally clickup-parent-page: <page ID or URL>) without clickup-page; the first # heading becomes the page name, and the new clickup-page URL is written back into the file. A subtitle front matter field sets the page subtitle.
+
 Requires the CLICKUP_API_TOKEN environment variable (or a .env file passed with --env-file).`;
 
 const UPDATE_TASK_DESCRIPTION = `Update a ClickUp task description from a Markdown file.
@@ -155,7 +157,11 @@ By default, the markdown file must contain a frontmatter entry pointing at the t
 
 For custom task IDs, set CLICKUP_TEAM_ID in the environment or .env file. The optional task_id and team_id args override frontmatter/environment values. Local Markdown image and file links are uploaded as task attachments (a file already attached with the same name and size is reused), then rewritten to ClickUp attachment URLs.
 
-Front matter can also set task fields: status, priority (urgent/high/normal/low/none or 1-4), points, time_estimate ("1h 30m"), start_date and due_date ("2026-11-20", "2026-11-20 14:00" local time, or an ISO timestamp with a zone), and outcome (the Outcome custom field).`;
+Front matter can also set task fields: status, priority (urgent/high/normal/low/none or 1-4), points, time_estimate ("1h 30m"), start_date and due_date ("2026-11-20", "2026-11-20 14:00" local time, or an ISO timestamp with a zone), and outcome (the Outcome custom field).
+
+To create a new task instead, use clickup-list: <List ID or URL> (and optionally clickup-parent-task: <task ID> for a subtask) without clickup-task-id; the first # heading becomes the task name, and the new clickup-task-id is written back into the file before the rest of the update runs.
+
+Sections headed "## Checklist" or "## Checklist: Name" with "- [ ] item" / "- [x] item" lines (indent to nest) become ClickUp checklists on the task and are left out of the description. Checklists and items are matched by name; missing ones are created, item state and nesting are updated, and nothing is deleted.`;
 
 const PULL_PAGE_DESCRIPTION = `Save a ClickUp Doc page as Markdown that update_clickup_page can push back.
 
@@ -163,7 +169,7 @@ The result starts with clickup-page front matter (and subtitle when the page has
 
 const PULL_TASK_DESCRIPTION = `Save a ClickUp task as Markdown that update_clickup_task can push back.
 
-The result starts with front matter (clickup-task-id, clickup-team-id for custom IDs, outcome, status, priority, points, time_estimate), then the task name as a # heading, then the Markdown description. Start and due dates are not written because ClickUp does not report whether they include a time. With file_path, the Markdown is written to that file (refused if it exists unless overwrite=true); without file_path, it is returned. When task_id is omitted, CLICKUP_TASK_ID is used.`;
+The result starts with front matter (clickup-task-id, clickup-team-id for custom IDs, outcome, status, priority, points, time_estimate), then the task name as a # heading, then the Markdown description, then one "## Checklist: Name" section per checklist. Start and due dates are not written because ClickUp does not report whether they include a time. With file_path, the Markdown is written to that file (refused if it exists unless overwrite=true); without file_path, it is returned. When task_id is omitted, CLICKUP_TASK_ID is used.`;
 
 const READ_TASK_DESCRIPTION = `Read selected details from a ClickUp task as a JSON document.
 

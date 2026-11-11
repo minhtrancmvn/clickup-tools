@@ -39,6 +39,7 @@ import {
   type CliSpec,
   type Output,
 } from "./common.js";
+import { extractChecklistSections, syncChecklists, type MarkdownChecklist } from "./checklists.js";
 import { getApiToken, getEnvValue } from "./env.js";
 import {
   createLinkContext,
@@ -49,6 +50,7 @@ import {
   parseFrontMatter,
   readMarkdown,
   resolveAssetPath,
+  setFrontMatterValues,
 } from "./update-page.js";
 
 const TASK_URL_RE = /app\.clickup\.com\/t\/(?:[^/]+\/)?([^/?#]+)/;
@@ -87,6 +89,8 @@ export interface PreparedTaskContent {
   fields: TaskFields;
   /** The front matter values behind `fields`, for display. */
   fieldSources: Record<string, string>;
+  /** `## Checklist` sections, removed from `content` and synced as ClickUp checklists. */
+  checklists: MarkdownChecklist[];
   normalizedLinks: number;
 }
 
@@ -466,6 +470,12 @@ export async function prepareMarkdownTaskContent(
 ): Promise<PreparedTaskContent> {
   const [metadata, body] = parseFrontMatter(readMarkdown(markdownPath));
   let [title, content] = extractTitle(body);
+  // `## Checklist` sections become ClickUp checklists instead of description text.
+  const [checklists, withoutChecklists] = extractChecklistSections(content);
+  if (checklists.length) {
+    const trimmed = withoutChecklists.trimEnd();
+    content = trimmed ? `${trimmed}\n` : "";
+  }
   const outcome = (metadata.outcome ?? "").trim() || null;
   const { fields, sources: fieldSources } = parseTaskFields(metadata);
   const markdownDir = path.dirname(markdownPath);
@@ -513,8 +523,79 @@ export async function prepareMarkdownTaskContent(
     outcome,
     fields,
     fieldSources,
+    checklists,
     normalizedLinks,
   };
+}
+
+/** Where a new task goes: the List from clickup-list, optionally as a subtask of clickup-parent-task. */
+export interface CreateTaskTarget {
+  listId: string;
+  parentTask: string;
+}
+
+/** Return the List ID from a numeric ID or a ClickUp List URL; throws ValueError. */
+export function parseListId(value: string): string {
+  const text = value.trim();
+  if (/^\d+$/.test(text)) return text;
+  const match = /\/li\/(\d+)/.exec(text) ?? /\/v\/l\/\d+-(\d+)-\d+/.exec(text);
+  if (match) return match[1]!;
+  throw new ValueError(`Cannot parse ClickUp List: ${pyRepr(value)}\nUse the List ID or a List URL like https://app.clickup.com/<workspace>/v/li/<list_id>`);
+}
+
+/** A create target when front matter has clickup-list but no clickup-task-id; otherwise null. */
+export function readCreateTaskTarget(filePath: string): CreateTaskTarget | null {
+  const [metadata] = parseFrontMatter(readMarkdown(filePath));
+  if (metadata["clickup-task-id"] || !metadata["clickup-list"]) return null;
+  return { listId: parseListId(metadata["clickup-list"]), parentTask: (metadata["clickup-parent-task"] ?? "").trim() };
+}
+
+/**
+ * Check everything that would make the follow-up update fail, before a task is
+ * created: a `# Name` heading, valid task fields, and existing local files.
+ */
+export function validateNewTaskFile(filePath: string): string {
+  const [metadata, body] = parseFrontMatter(readMarkdown(filePath));
+  const [title, content] = extractTitle(body);
+  if (!title) throw new ValueError("A new task needs a name: start the Markdown with a `# Task name` heading.");
+  parseTaskFields(metadata);
+  const missing = findLocalAttachmentReferences(content, path.dirname(filePath)).filter((attachment) => !isFile(attachment.path));
+  if (missing.length) {
+    const missingText = missing.map((item) => `  ${item.target} -> ${item.path}`).join("\n");
+    throw new FileNotFoundError(`Referenced attachment file not found:\n${missingText}`);
+  }
+  return title;
+}
+
+/** Create a task (name only; the normal update fills in the rest) and return the API response. */
+export async function createTask(
+  listId: string,
+  task: { name: string; parent: string | null },
+  apiToken: string,
+): Promise<Record<string, unknown>> {
+  const payload: Record<string, unknown> = { name: task.name };
+  if (task.parent) payload.parent = task.parent;
+  const body = await httpRequest(`https://api.clickup.com/api/v2/list/${listId}/task`, {
+    method: "POST",
+    headers: jsonHeaders(apiToken, true),
+    body: JSON.stringify(payload),
+  });
+  const created = body ? parseJson(body) : {};
+  if (!isDict(created) || typeof created.id !== "string" || !created.id) {
+    throw new ValueError("ClickUp did not return the new task ID.");
+  }
+  return created;
+}
+
+/** Resolve clickup-parent-task (ID, custom ID or URL) to the internal task ID Create Task needs. */
+export async function resolveParentTask(value: string, teamId: string, apiToken: string): Promise<string> {
+  const parentId = parseTaskId(value);
+  if (!isCustomTaskId(parentId)) return parentId;
+  if (!teamId) {
+    throw new ValueError("CLICKUP_TEAM_ID is required when clickup-parent-task is a custom task ID.");
+  }
+  const parent = await getTask(taskDestination(parentId, teamId, true), apiToken);
+  return extractInternalTaskId(parent, parentId);
 }
 
 /** Find local Markdown file references to upload as task attachments. */
@@ -574,13 +655,26 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
 
   let destination: TaskDestination;
   try {
-    destination = resolveDestination(file, {
-      taskId: stringOption(parsed, "task-id"),
-      teamId: stringOption(parsed, "team-id"),
-    });
+    // A file with clickup-list but no clickup-task-id creates the task first.
+    const createTarget = stringOption(parsed, "task-id") ? null : readCreateTaskTarget(file);
+    if (createTarget) {
+      const created = await createTaskFromFile(file, createTarget, stringOption(parsed, "team-id"), apiToken, io);
+      if (typeof created === "number") return created;
+      destination = created;
+    } else {
+      destination = resolveDestination(file, {
+        taskId: stringOption(parsed, "task-id"),
+        teamId: stringOption(parsed, "team-id"),
+      });
+    }
   } catch (error) {
     if (error instanceof FileNotFoundError || error instanceof ValueError) {
       err(io, error.message);
+      return 1;
+    }
+    if (error instanceof HttpError) return reportHttpError(error, io);
+    if (error instanceof NetworkError) {
+      err(io, `Network error: ${error.reason}`);
       return 1;
     }
     throw error;
@@ -630,6 +724,10 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
   if (!noRichLinks) {
     info(io, `Links       : normalized=${prepared.normalizedLinks}`);
   }
+  for (const checklist of prepared.checklists) {
+    const count = checklist.items.length;
+    info(io, `Checklist   : ${checklist.name} (${count} ${count === 1 ? "item" : "items"})`);
+  }
   print(io);
 
   try {
@@ -660,10 +758,65 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
     }
   }
 
+  if (prepared.checklists.length) {
+    try {
+      const synced = await syncChecklists(destination, prepared.checklists, apiToken);
+      ok(
+        io,
+        `Checklists synced (checklists created=${synced.checklistsCreated}, items created=${synced.itemsCreated}, items updated=${synced.itemsUpdated})`,
+      );
+    } catch (error) {
+      if (error instanceof HttpError) return reportHttpError(error, io);
+      if (error instanceof NetworkError) {
+        err(io, `Network error: ${error.reason}`);
+        return 1;
+      }
+      err(io, `Unexpected error syncing checklists: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
+
   print(io);
   ok(io, "Task description updated");
   ok(io, `URL: ${BOLD}${buildTaskUrl(destination.taskId, destination.teamId)}${RESET}`);
   return 0;
+}
+
+/**
+ * Validate the file, create the task in its List, and save the new ID to the
+ * front matter before anything else, so a later failure never leads to a
+ * duplicate task on the next run. Returns the new task's destination, or an
+ * exit code when the ID could not be saved.
+ */
+async function createTaskFromFile(
+  file: string,
+  target: CreateTaskTarget,
+  teamIdOption: string,
+  apiToken: string,
+  io: Output,
+): Promise<TaskDestination | number> {
+  const name = validateNewTaskFile(file);
+  const [metadata] = parseFrontMatter(readMarkdown(file));
+  const teamId = teamIdOption.trim() || (metadata["clickup-team-id"] ?? "").trim() || getEnvValue("CLICKUP_TEAM_ID").trim();
+  const parent = target.parentTask ? await resolveParentTask(target.parentTask, teamId, apiToken) : null;
+
+  const created = await createTask(target.listId, { name, parent }, apiToken);
+  const id = created.id as string;
+  const customId = typeof created.custom_id === "string" ? created.custom_id.trim() : "";
+  const createdTeam = (typeof created.team_id === "string" ? created.team_id : "") || teamId;
+  const entries: Array<[string, string]> =
+    customId && createdTeam ? [["clickup-task-id", customId], ["clickup-team-id", createdTeam]] : [["clickup-task-id", id]];
+  info(io, `Created     : task ${customId || id} in List ${target.listId}${parent ? ` (subtask of ${parent})` : ""}`);
+
+  try {
+    setFrontMatterValues(file, entries);
+  } catch (error) {
+    err(io, `Task ${customId || id} was created, but saving clickup-task-id to ${file} failed: ${errorMessage(error)}`);
+    err(io, "Add that clickup-task-id line to the front matter yourself before running again.");
+    return 1;
+  }
+  info(io, `Saved       : clickup-task-id to ${file}`);
+  return taskDestination(id);
 }
 
 /** CLI entry point. */

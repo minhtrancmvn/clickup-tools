@@ -124,6 +124,8 @@ clickup-update-page notes.md --allow-local-media
 
 Supported URLs are `https://app.clickup.com/{workspace_id}/v/dc/{doc_id}/{page_id}` and `https://app.clickup.com/{workspace_id}/docs/{doc_id}/{page_id}`. With a `clickup-page` front matter field, only the file path is needed. The first `# Heading` line becomes the page title and is removed from the body, and a `subtitle` front matter field sets the page subtitle.
 
+To create a new page, use `clickup-doc: <Doc URL>` instead of `clickup-page` (add `clickup-parent-page: <page ID or URL>` for a sub-page). The file needs a `# Page name` heading; after the page is created, its `clickup-page` URL is written back into the front matter, so the next run updates it.
+
 ### `clickup-update-task`
 
 Replaces a task description with the Markdown body.
@@ -138,6 +140,20 @@ clickup-update-task task.md --no-rich-links
 The first `# Heading` line becomes the task name and is removed from the description. Local image and file links such as `![flow](flow.gif)` are uploaded as task attachments and rewritten to the attachment URLs. A file that is already attached to the task with the same name and size is reused instead of uploaded again.
 
 Front matter can also set task fields: `status`, `priority` (`urgent`, `high`, `normal`, `low`, `none` or 1-4), `points`, `time_estimate` (`2h`, `45m`, `1h 30m`), and `start_date` / `due_date` (`2026-11-20` for a date, `2026-11-20 14:00` for a local time, or an ISO timestamp with a time zone). Invalid values stop the update before anything is sent.
+
+To create a new task, use `clickup-list: <List ID or URL>` instead of `clickup-task-id` (add `clickup-parent-task: <task ID>` to make it a subtask). The file needs a `# Task name` heading. The task is created, its `clickup-task-id` is written back into the front matter straight away (so a failure later can't create a duplicate on the next run), and then the normal update runs.
+
+Sections headed `## Checklist` or `## Checklist: Name` become ClickUp checklists on the task and are left out of the description:
+
+```markdown
+## Checklist: QA
+- [x] Smoke test
+  - [ ] iOS
+  - [x] Android
+- [ ] Regression
+```
+
+Indent an item to nest it under the one above. Checklists and items are matched by name: missing ones are created, done/not-done state and nesting are updated, and nothing in ClickUp is deleted.
 
 ### `clickup-read-task`
 
@@ -163,7 +179,7 @@ clickup-pull-task OOLE-523 -o OOLE-523.md
 clickup-pull-task OOLE-523 > OOLE-523.md      # without -o, the Markdown goes to standard output
 ```
 
-A pulled page has `clickup-page` (and `subtitle`) front matter, the page name as a `# heading`, then the content. A pulled task has `clickup-task-id` (plus `clickup-team-id` for custom IDs), `outcome`, `status`, `priority`, `points` and `time_estimate`, the task name as a `# heading`, then the Markdown description. Start and due dates are left out because ClickUp doesn't report whether they include a time, so pushing them back could change them. An existing file is never replaced unless you pass `--force`.
+A pulled page has `clickup-page` (and `subtitle`) front matter, the page name as a `# heading`, then the content. A pulled task has `clickup-task-id` (plus `clickup-team-id` for custom IDs), `outcome`, `status`, `priority`, `points` and `time_estimate`, the task name as a `# heading`, then the Markdown description and one `## Checklist: Name` section per checklist. Start and due dates are left out because ClickUp doesn't report whether they include a time, so pushing them back could change them. An existing file is never replaced unless you pass `--force`.
 
 ### `clickup-send-telegram`
 
@@ -200,6 +216,10 @@ Markdown front matter routes a file to its destination and is never uploaded:
 clickup-page: https://app.clickup.com/123/v/dc/doc-id/page-id
 clickup-task-id: OOLE-523
 clickup-team-id: 1234567890
+clickup-doc: https://app.clickup.com/123/v/dc/doc-id
+clickup-parent-page: parent-page-id
+clickup-list: https://app.clickup.com/123/v/li/901801482831
+clickup-parent-task: OOLE-500
 outcome: Fixed and deployed
 subtitle: Draft for review
 status: in progress
@@ -211,7 +231,7 @@ due_date: 2026-11-25 17:00
 ---
 ```
 
-`clickup-page` and `subtitle` are read by `clickup-update-page`. The other keys are read by `clickup-update-task`: `outcome` sets the task's `Outcome` custom field, and `status`, `priority`, `points`, `time_estimate`, `start_date` and `due_date` set those task fields.
+`clickup-page`, `clickup-doc`, `clickup-parent-page` and `subtitle` are read by `clickup-update-page`; `clickup-doc` only applies when `clickup-page` is missing. `clickup-list` and `clickup-parent-task` only apply when `clickup-task-id` is missing. The other keys are read by `clickup-update-task`: `outcome` sets the task's `Outcome` custom field, and `status`, `priority`, `points`, `time_estimate`, `start_date` and `due_date` set those task fields.
 
 All requests honour ClickUp's rate limit: when ClickUp answers HTTP 429, the tools wait for the reset time it reports (up to a minute) and retry, at most twice.
 
