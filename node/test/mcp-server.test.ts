@@ -120,7 +120,7 @@ describe("MCP protocol", () => {
     const data = JSON.parse(text.slice("Success.\n".length));
     expect(data).toMatchObject({ title: "Task", status: "open", url: "https://app.clickup.com/t/abc123" });
     expect(calls.map((call) => call.url)).toEqual([
-      "https://api.clickup.com/api/v2/task/abc123?include_subtasks=true",
+      "https://api.clickup.com/api/v2/task/abc123?include_subtasks=true&include_markdown_description=true",
       "https://api.clickup.com/api/v2/task/abc123/time",
     ]);
     await client.close();

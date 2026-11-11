@@ -58,6 +58,8 @@ export interface PreparedContent {
   content: string;
   localMediaRefs: string[];
   normalizedLinks: number;
+  /** Page subtitle from the `subtitle` front matter field. */
+  subtitle: string | null;
 }
 
 /** Caches metadata lookups while linkifying one document. */
@@ -119,6 +121,7 @@ export async function updatePage(
   apiToken: string,
   editMode: EditMode = "replace",
   name: string | null = null,
+  subTitle: string | null = null,
 ): Promise<unknown> {
   const url = `https://api.clickup.com/api/v3/workspaces/${workspaceId}/docs/${docId}/pages/${pageId}`;
   const data: Record<string, unknown> = {
@@ -128,6 +131,9 @@ export async function updatePage(
   };
   if (name !== null) {
     data.name = name;
+  }
+  if (subTitle !== null) {
+    data.sub_title = subTitle;
   }
 
   const body = await httpRequest(url, {
@@ -316,11 +322,12 @@ export async function prepareMarkdownContent(
   apiToken: string,
   { richLinks = true }: { richLinks?: boolean } = {},
 ): Promise<PreparedContent> {
-  const [, content] = parseFrontMatter(readMarkdown(markdownPath));
+  const [metadata, content] = parseFrontMatter(readMarkdown(markdownPath));
   const prepared: PreparedContent = {
     content,
     localMediaRefs: findLocalMediaReferences(content, path.dirname(markdownPath)),
     normalizedLinks: 0,
+    subtitle: (metadata.subtitle ?? "").trim() || null,
   };
 
   if (richLinks) {
@@ -695,10 +702,13 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
   if (title) {
     info(io, `Title  : ${title}`);
   }
+  if (prepared.subtitle) {
+    info(io, `Subtitle: ${prepared.subtitle}`);
+  }
   print(io);
 
   try {
-    await updatePage(workspaceId, docId, pageId, body, apiToken, editMode, title);
+    await updatePage(workspaceId, docId, pageId, body, apiToken, editMode, title, prepared.subtitle);
   } catch (error) {
     if (error instanceof HttpError) return reportHttpError(error, io);
     if (error instanceof NetworkError) {

@@ -43,7 +43,9 @@ import {
 
 const TASK_URL_WITH_TEAM_RE = /app\.clickup\.com\/t\/([^/?#]+)\/([^/?#]+)/;
 export const DEFAULT_COMMENT_LIMIT = 20;
-export const MAX_COMMENT_LIMIT = 25;
+/** Comments are fetched in pages of COMMENT_PAGE_SIZE, so limits above it cost extra requests. */
+export const MAX_COMMENT_LIMIT = 100;
+export const COMMENT_PAGE_SIZE = 25;
 /** Safety cap on subtask recursion depth to avoid runaway fetches. */
 export const MAX_SUBTASK_DEPTH = 10;
 
@@ -57,6 +59,10 @@ export interface Comment {
   dateMs: number | null;
   text: string;
   resolved: boolean;
+  replyCount: number;
+  /** Threaded replies, oldest first; only fetched when replies were requested. */
+  replies: Comment[];
+  repliesNote: string;
 }
 
 /** A single ClickUp time tracking entry. */
@@ -75,6 +81,8 @@ export interface Subtask {
   name: string;
   status: string;
   subtasks: Subtask[];
+  /** Set when this subtask's own children could not be loaded, so the tree below it is incomplete. */
+  subtasksNote: string;
 }
 
 /** A task checklist item. */
@@ -109,13 +117,15 @@ export interface TaskDetails {
   checklists: Checklist[];
   comments: Comment[];
   commentsIncluded: boolean;
+  repliesIncluded: boolean;
   commentsNote: string;
 }
 
 export const PROG = "clickup-read-task";
 
 const USAGE = `usage: clickup-read-task [-h] [--task-id ID] [--team-id ID] [--json]
-                         [--include-comments] [--comment-limit COUNT]
+                         [--include-comments] [--include-replies]
+                         [--comment-limit COUNT]
                          [TASK_OR_URL]
 `;
 
@@ -133,6 +143,8 @@ options:
   --json                Output task details as JSON (AI-ready, omits status
                         lines)
   --include-comments    Include recent task comments
+  --include-replies     Include threaded replies under each comment (implies
+                        --include-comments)
   --comment-limit COUNT
                         Maximum comments to include (1-${MAX_COMMENT_LIMIT}, default: ${DEFAULT_COMMENT_LIMIT})
 
@@ -142,6 +154,7 @@ examples:
   clickup-read-task https://app.clickup.com/t/1234567890/OOLE-523
   clickup-read-task --task-id OOLE-523 --json
   clickup-read-task --task-id OOLE-523 --include-comments --comment-limit 10
+  clickup-read-task --task-id OOLE-523 --json --include-replies
 
 metadata:
   When no task is provided, the task is read from CLICKUP_TASK_ID in .env.
@@ -162,11 +175,12 @@ export const CLI: CliSpec = {
     "team-id": { type: "string" },
     json: { type: "boolean" },
     "include-comments": { type: "boolean" },
+    "include-replies": { type: "boolean" },
     "comment-limit": { type: "string" },
   },
 };
 
-/** Parse a comment count bounded by ClickUp's 25-comment API page; throws ValueError. */
+/** Parse a comment count between 1 and MAX_COMMENT_LIMIT; throws ValueError. */
 export function parseCommentLimit(value: string): number {
   const limit = /^\s*[+-]?\d+(?:_\d+)*\s*$/.test(value) ? pyInt(value) : null;
   if (limit === null) {
@@ -184,6 +198,7 @@ export interface ReadTaskArgs {
   teamId: string;
   json: boolean;
   includeComments: boolean;
+  includeReplies: boolean;
   commentLimit: number;
 }
 
@@ -209,7 +224,8 @@ export function parseReadTaskArgs(argv: readonly string[], io: Output = processO
     taskId: stringOption(parsed, "task-id"),
     teamId: stringOption(parsed, "team-id"),
     json: flagOption(parsed, "json"),
-    includeComments: flagOption(parsed, "include-comments"),
+    includeComments: flagOption(parsed, "include-comments") || flagOption(parsed, "include-replies"),
+    includeReplies: flagOption(parsed, "include-replies"),
     commentLimit,
   };
 }
@@ -264,6 +280,7 @@ export function extractTaskDetails(task: unknown, { outcomeFieldId = "" }: { out
     checklists: extractChecklists(record),
     comments: [],
     commentsIncluded: false,
+    repliesIncluded: false,
     commentsNote: "",
   };
 }
@@ -333,9 +350,13 @@ async function requestJson(url: string, apiToken: string): Promise<unknown> {
   return parseJson(body);
 }
 
-/** Fetch a ClickUp task including its (direct) subtasks. */
+/**
+ * Fetch a ClickUp task including its (direct) subtasks. The description is
+ * requested as Markdown: without include_markdown_description ClickUp returns
+ * only the flattened plain-text description.
+ */
 export async function getTaskWithSubtasks(destination: TaskDestination, apiToken: string): Promise<unknown> {
-  const params: Record<string, string> = { include_subtasks: "true" };
+  const params: Record<string, string> = { include_subtasks: "true", include_markdown_description: "true" };
   if (destination.customTaskId) {
     params.custom_task_ids = "true";
     params.team_id = destination.teamId;
@@ -388,12 +409,14 @@ export function extractSubtasks(task: Json): Subtask[] {
     name: stringValue(item.name) || "Untitled",
     status: extractStatus(item),
     subtasks: [],
+    subtasksNote: "",
   }));
 }
 
 /**
  * Recursively populate each subtask's own subtasks until the tree is exhausted.
  * A visited set guards against cycles and repeated fetches; maxDepth bounds recursion.
+ * A failed child fetch keeps the subtask and records why its children are missing.
  */
 export async function expandSubtasks(
   subtasks: Subtask[],
@@ -403,14 +426,15 @@ export async function expandSubtasks(
   const expanded: Subtask[] = [];
   for (const subtask of subtasks) {
     let children: Subtask[] = [];
+    let subtasksNote = "";
     if (subtask.taskId && !visited.has(subtask.taskId) && depth < maxDepth) {
       visited.add(subtask.taskId);
-      let rawChildren: Json[];
+      let rawChildren: Json[] = [];
       try {
         rawChildren = await fetchChildSubtasks(subtask.taskId, apiToken);
       } catch (error) {
         if (!(error instanceof HttpError || error instanceof NetworkError)) throw error;
-        rawChildren = [];
+        subtasksNote = unavailableNote(error);
       }
       children = await expandSubtasks(extractSubtasks({ subtasks: rawChildren }), apiToken, {
         maxDepth,
@@ -418,21 +442,64 @@ export async function expandSubtasks(
         visited,
       });
     }
-    expanded.push({ ...subtask, subtasks: children });
+    expanded.push({ ...subtask, subtasks: children, subtasksNote });
   }
   return expanded;
 }
 
-/** Fetch the newest ClickUp task comments, bounded to one API page. */
+/** Whether any subtask in the tree failed to load its children. */
+export function subtaskTreeIncomplete(subtasks: Subtask[]): boolean {
+  return subtasks.some((subtask) => Boolean(subtask.subtasksNote) || subtaskTreeIncomplete(subtask.subtasks));
+}
+
+/**
+ * Fetch the newest ClickUp task comments, newest first. ClickUp returns 25 per
+ * page; older pages are requested with the last comment's date and id.
+ */
 export async function getTaskComments(
   destination: TaskDestination,
   apiToken: string,
   { limit = DEFAULT_COMMENT_LIMIT }: { limit?: number } = {},
 ): Promise<Json[]> {
-  const url = `https://api.clickup.com/api/v2/task/${destination.taskId}/comment${taskQuery(destination)}`;
-  const payload = asDict(await requestJson(url, apiToken));
-  if (!Array.isArray(payload.comments)) return [];
-  return payload.comments.filter(isDict).slice(0, limit);
+  const base = `https://api.clickup.com/api/v2/task/${destination.taskId}/comment`;
+  const comments: Json[] = [];
+  const seen = new Set<string>();
+  let cursor: { start: string; startId: string } | null = null;
+
+  while (comments.length < limit) {
+    const params: Record<string, string> = {};
+    if (destination.customTaskId) {
+      params.custom_task_ids = "true";
+      params.team_id = destination.teamId;
+    }
+    if (cursor) {
+      params.start = cursor.start;
+      params.start_id = cursor.startId;
+    }
+    const query = Object.keys(params).length ? `?${pyUrlencode(params)}` : "";
+    const payload = asDict(await requestJson(`${base}${query}`, apiToken));
+    const page = Array.isArray(payload.comments) ? payload.comments.filter(isDict) : [];
+
+    for (const comment of page) {
+      const id = stringValue(comment.id);
+      if (id && seen.has(id)) continue;
+      if (id) seen.add(id);
+      comments.push(comment);
+    }
+
+    const last = page[page.length - 1];
+    if (page.length < COMMENT_PAGE_SIZE || !last) break;
+    const next = { start: stringValue(last.date), startId: stringValue(last.id) };
+    if (!next.start || !next.startId || (cursor && next.startId === cursor.startId)) break;
+    cursor = next;
+  }
+  return comments.slice(0, limit);
+}
+
+/** Fetch the threaded replies of a comment (the parent comment is not included). */
+export async function getCommentReplies(commentId: string, apiToken: string): Promise<Json[]> {
+  const payload = asDict(await requestJson(`https://api.clickup.com/api/v2/comment/${commentId}/reply`, apiToken));
+  return Array.isArray(payload.comments) ? payload.comments.filter(isDict) : [];
 }
 
 /** Extract stable, AI-ready fields from ClickUp task comments. */
@@ -444,7 +511,30 @@ export function extractComments(records: Json[]): Comment[] {
     dateMs: parseEpochMs(record.date),
     text: extractCommentText(record),
     resolved: record.resolved === true,
+    replyCount: Math.max(0, pyInt(record.reply_count) ?? 0),
+    replies: [],
+    repliesNote: "",
   }));
+}
+
+/** Attach threaded replies (oldest first) to every comment that has any. */
+export async function attachReplies(comments: Comment[], apiToken: string): Promise<Comment[]> {
+  const withReplies: Comment[] = [];
+  for (const comment of comments) {
+    if (!comment.replyCount || !comment.commentId) {
+      withReplies.push(comment);
+      continue;
+    }
+    try {
+      const replies = extractComments(await getCommentReplies(comment.commentId, apiToken));
+      replies.sort((left, right) => (left.dateMs ?? 0) - (right.dateMs ?? 0));
+      withReplies.push({ ...comment, replies });
+    } catch (error) {
+      if (!(error instanceof HttpError || error instanceof NetworkError)) throw error;
+      withReplies.push({ ...comment, repliesNote: unavailableNote(error) });
+    }
+  }
+  return withReplies;
 }
 
 /** Extract plain comment text, falling back to rich-text fragments. */
@@ -640,7 +730,12 @@ export function renderTaskDetails(details: TaskDetails): string {
     if (details.comments.length) {
       for (const comment of details.comments) {
         const resolved = comment.resolved ? "  [resolved]" : "";
-        lines.push(`  - ${comment.date}  ${comment.user}  ${comment.text}${resolved}`);
+        const replies = comment.replyCount ? `  [${comment.replyCount} ${comment.replyCount === 1 ? "reply" : "replies"}]` : "";
+        lines.push(`  - ${comment.date}  ${comment.user}  ${comment.text}${resolved}${replies}`);
+        for (const reply of comment.replies) {
+          lines.push(`      > ${reply.date}  ${reply.user}  ${reply.text}`);
+        }
+        if (comment.repliesNote) lines.push(`      > Replies ${comment.repliesNote.toLowerCase()}`);
       }
     } else {
       lines.push(`  ${details.commentsNote || "None"}`);
@@ -685,7 +780,8 @@ export function renderSubtaskLines(subtasks: Subtask[], depth = 1): string[] {
   const lines: string[] = [];
   const indent = "  ".repeat(depth);
   for (const subtask of subtasks) {
-    lines.push(`${indent}- ${subtask.customId || subtask.taskId}  ${subtask.name}  (${subtask.status})`);
+    const note = subtask.subtasksNote ? `  [subtasks ${subtask.subtasksNote.toLowerCase()}]` : "";
+    lines.push(`${indent}- ${subtask.customId || subtask.taskId}  ${subtask.name}  (${subtask.status})${note}`);
     lines.push(...renderSubtaskLines(subtask.subtasks, depth + 1));
   }
   return lines;
@@ -726,8 +822,11 @@ export function detailsToDict(details: TaskDetails, { url = "" }: { url?: string
   data.has_subtasks = details.subtasks.length > 0;
   data.subtask_count = countSubtasks(details.subtasks);
   data.subtasks = details.subtasks.map(subtaskToDict);
+  if (subtaskTreeIncomplete(details.subtasks)) {
+    data.subtasks_incomplete = true;
+  }
   if (details.commentsIncluded) {
-    data.comments = details.comments.map(commentToDict);
+    data.comments = details.comments.map((comment) => commentToDict(comment, { includeReplies: details.repliesIncluded }));
     if (!details.comments.length && details.commentsNote) {
       data.comments_note = details.commentsNote;
     }
@@ -737,26 +836,34 @@ export function detailsToDict(details: TaskDetails, { url = "" }: { url?: string
 }
 
 /** Build a JSON-serialisable mapping for a task comment. */
-export function commentToDict(comment: Comment): Json {
-  return {
+export function commentToDict(comment: Comment, { includeReplies = false }: { includeReplies?: boolean } = {}): Json {
+  const data: Json = {
     id: comment.commentId,
     user: comment.user,
     date: comment.date,
     date_ms: comment.dateMs,
     text: comment.text,
     resolved: comment.resolved,
+    reply_count: comment.replyCount,
   };
+  if (includeReplies) {
+    data.replies = comment.replies.map((reply) => commentToDict(reply));
+    if (comment.repliesNote) data.replies_note = comment.repliesNote;
+  }
+  return data;
 }
 
 /** Build a JSON-serialisable mapping for a subtask and its nested subtasks. */
 export function subtaskToDict(subtask: Subtask): Json {
-  return {
+  const data: Json = {
     task_id: subtask.taskId,
     custom_id: subtask.customId || null,
     name: subtask.name,
     status: subtask.status,
     subtasks: subtask.subtasks.map(subtaskToDict),
   };
+  if (subtask.subtasksNote) data.subtasks_note = subtask.subtasksNote;
+  return data;
 }
 
 /** Render task details as a JSON document. */
@@ -841,9 +948,11 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
   if (args.includeComments) {
     try {
       const rawComments = await getTaskComments(destination, apiToken, { limit: args.commentLimit });
-      details = { ...details, comments: extractComments(rawComments), commentsIncluded: true };
+      let comments = extractComments(rawComments);
+      if (args.includeReplies) comments = await attachReplies(comments, apiToken);
+      details = { ...details, comments, commentsIncluded: true, repliesIncluded: args.includeReplies };
     } catch (error) {
-      details = { ...details, commentsIncluded: true, commentsNote: unavailableNote(error) };
+      details = { ...details, commentsIncluded: true, repliesIncluded: args.includeReplies, commentsNote: unavailableNote(error) };
     }
   }
 

@@ -75,17 +75,22 @@ export function readTaskArgv({
   task_id = "",
   team_id = "",
   include_comments = false,
+  include_replies = false,
   comment_limit = 20,
 }: {
   task_id?: string;
   team_id?: string;
   include_comments?: boolean;
+  include_replies?: boolean;
   comment_limit?: number;
 }): string[] {
   const argv = ["--json"];
   if (task_id) argv.push("--task-id", task_id);
   if (team_id) argv.push("--team-id", team_id);
-  if (include_comments) argv.push("--include-comments", "--comment-limit", String(comment_limit));
+  if (include_comments || include_replies) {
+    argv.push("--include-comments", "--comment-limit", String(comment_limit));
+    if (include_replies) argv.push("--include-replies");
+  }
   return argv;
 }
 
@@ -117,7 +122,7 @@ For custom task IDs, set CLICKUP_TEAM_ID in the environment or .env file. The op
 
 const READ_TASK_DESCRIPTION = `Read selected details from a ClickUp task as a JSON document.
 
-Returns a JSON object with title, status, description, time estimate, tracked time, tags, the Outcome custom field, individual time entries (user, date, duration), checklists with item completion, nested subtasks, and the task URL. Call with include_comments=true when recent discussion is needed; comments are omitted by default to keep reads fast and output small.
+Returns a JSON object with title, status, description, time estimate, tracked time, tags, the Outcome custom field, individual time entries (user, date, duration), checklists with item completion, nested subtasks, and the task URL. The description is returned as Markdown. Call with include_comments=true when recent discussion is needed (each comment has a reply_count); add include_replies=true to also return threaded replies. Comments are omitted by default to keep reads fast and output small. If subtasks_incomplete is true, part of the subtask tree could not be loaded (see subtasks_note).
 
 When task_id is omitted, it is read from CLICKUP_TASK_ID in the environment or .env file. For custom task IDs, set CLICKUP_TEAM_ID in the environment or .env file. The optional team_id arg overrides the environment value.`;
 
@@ -166,7 +171,11 @@ export function createServer(runners: ToolRunners = defaultRunners): McpServer {
           .describe("Optional ClickUp task ID, custom task ID, or task URL. Falls back to CLICKUP_TASK_ID when omitted."),
         team_id: z.string().default("").describe("Optional ClickUp team/workspace ID for custom task IDs."),
         include_comments: z.boolean().default(false).describe("Include recent task comments when true. Defaults to false."),
-        comment_limit: z.number().int().default(20).describe("Maximum comments to return, from 1 to 25. Defaults to 20."),
+        include_replies: z
+          .boolean()
+          .default(false)
+          .describe("Also return threaded replies under each comment (implies include_comments). Defaults to false."),
+        comment_limit: z.number().int().default(20).describe("Maximum comments to return, from 1 to 100. Defaults to 20."),
       },
       annotations: { readOnlyHint: true },
     },

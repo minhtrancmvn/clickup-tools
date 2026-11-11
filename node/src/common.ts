@@ -94,6 +94,7 @@ export class HttpError extends Error {
     readonly code: number,
     readonly reason: string,
     readonly body: string,
+    readonly headers: Headers = new Headers(),
   ) {
     super(`HTTP Error ${code}: ${reason}`);
   }
@@ -122,6 +123,8 @@ export interface RequestOptions {
   body?: string | Uint8Array;
   /** Omit for no timeout (matches urlopen calls without a timeout). */
   timeoutMs?: number;
+  /** How many times to wait out an HTTP 429 and retry (default 2). */
+  rateLimitRetries?: number;
 }
 
 function describeFetchError(error: unknown): string {
@@ -140,30 +143,69 @@ function describeFetchError(error: unknown): string {
 
 /** Perform an HTTP request and return the response body text. */
 export async function httpRequest(url: string, options: RequestOptions = {}): Promise<string> {
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: options.method ?? "GET",
-      headers: options.headers,
-      body: options.body,
-      signal: options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined,
-    });
-  } catch (error) {
-    throw new NetworkError(describeFetchError(error));
-  }
+  const retries = options.rateLimitRetries ?? DEFAULT_RATE_LIMIT_RETRIES;
+  for (let attempt = 0; ; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: options.method ?? "GET",
+        headers: options.headers,
+        body: options.body,
+        signal: options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined,
+      });
+    } catch (error) {
+      throw new NetworkError(describeFetchError(error));
+    }
 
-  let text: string;
-  try {
-    text = await response.text();
-  } catch (error) {
-    throw new NetworkError(describeFetchError(error));
-  }
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw new NetworkError(describeFetchError(error));
+    }
 
-  if (!response.ok) {
-    const reason = response.statusText || STATUS_CODES[response.status] || "";
-    throw new HttpError(response.status, reason, text);
+    // A 429 means the request was not processed, so retrying is safe for any method.
+    if (response.status === 429 && attempt < retries) {
+      const delay = rateLimitDelayMs(response.headers) ?? FALLBACK_RATE_LIMIT_WAIT_MS * (attempt + 1);
+      if (delay <= MAX_RATE_LIMIT_WAIT_MS) {
+        await timers.sleep(delay);
+        continue;
+      }
+    }
+
+    if (!response.ok) {
+      const reason = response.statusText || STATUS_CODES[response.status] || "";
+      throw new HttpError(response.status, reason, text, response.headers);
+    }
+    return text;
   }
-  return text;
+}
+
+/** Longest single wait for a rate-limit reset; anything longer fails fast instead of hanging. */
+export const MAX_RATE_LIMIT_WAIT_MS = 60_000;
+const DEFAULT_RATE_LIMIT_RETRIES = 2;
+const FALLBACK_RATE_LIMIT_WAIT_MS = 2_000;
+
+/** Clock and sleep indirection so tests do not wait in real time. */
+export const timers = {
+  now: (): number => Date.now(),
+  sleep: (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/** Milliseconds to wait before retrying a 429, from Retry-After or X-RateLimit-Reset; null when neither is usable. */
+export function rateLimitDelayMs(headers: Headers, now: number = timers.now()): number | null {
+  const retryAfter = headers.get("retry-after")?.trim();
+  if (retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter)) {
+    return Math.ceil(Number(retryAfter) * 1000);
+  }
+  const reset = headers.get("x-ratelimit-reset")?.trim();
+  if (reset && /^\d+$/.test(reset)) {
+    const value = Number(reset);
+    // ClickUp sends Unix seconds; accept milliseconds too.
+    const resetMs = value > 1e12 ? value : value * 1000;
+    return Math.max(0, resetMs - now) + 500;
+  }
+  return null;
 }
 
 /** Parse JSON, raising ValueError like Python's json.loads. */
