@@ -1,0 +1,509 @@
+/** Update a ClickUp task description from a Markdown file. */
+
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  BOLD,
+  RESET,
+  FileNotFoundError,
+  HttpError,
+  NetworkError,
+  ValueError,
+  err,
+  errorMessage,
+  flagOption,
+  formatThousands,
+  guessMimeType,
+  httpRequest,
+  info,
+  isDict,
+  isFile,
+  ok,
+  parseCli,
+  parseJson,
+  pathExists,
+  print,
+  printMissingTokenHelp,
+  processOutput,
+  pyLen,
+  pyRepr,
+  pyResolve,
+  pySlice,
+  pyUnquote,
+  pyUrlencode,
+  reportHttpError,
+  stringOption,
+  type CliSpec,
+  type Output,
+} from "./common.js";
+import { getApiToken, getEnvValue } from "./env.js";
+import {
+  createLinkContext,
+  extractTitle,
+  isLocalAssetReference,
+  linkifyBareUrls,
+  normalizeMarkdownUrl,
+  parseFrontMatter,
+  readMarkdown,
+  resolveAssetPath,
+} from "./update-page.js";
+
+const TASK_URL_RE = /app\.clickup\.com\/t\/(?:[^/]+\/)?([^/?#]+)/;
+const CUSTOM_TASK_ID_RE = /^[A-Z][A-Z0-9]+-\d+$/;
+const MARKDOWN_LINK_OR_IMAGE_SOURCE = String.raw`(!?\[[^\]]*\]\()(<[^>\n]+>|[^)\s\n]+)([^)\n]*\))`;
+export const DEFAULT_OUTCOME_FIELD_ID = "8477a7ee-f750-4e8e-8298-0131ef93adab";
+
+/** Resolved destination for a ClickUp task request. */
+export interface TaskDestination {
+  taskId: string;
+  teamId: string;
+  customTaskId: boolean;
+}
+
+export function taskDestination(taskId: string, teamId = "", customTaskId = false): TaskDestination {
+  return { taskId, teamId, customTaskId };
+}
+
+/** A local file referenced by Markdown content. */
+export interface LocalAttachment {
+  target: string;
+  path: string;
+}
+
+/** Markdown content after ClickUp task-oriented preprocessing. */
+export interface PreparedTaskContent {
+  content: string;
+  attachments: LocalAttachment[];
+  /** Resolved local path -> uploaded attachment URL, in upload order. */
+  uploadedAttachments: Map<string, string>;
+  title: string | null;
+  outcome: string | null;
+  normalizedLinks: number;
+}
+
+export const PROG = "clickup-update-task";
+
+const USAGE = `usage: clickup-update-task [-h] [--task-id ID] [--team-id ID]
+                           [--no-rich-links]
+                           [FILE]
+`;
+
+const HELP = `${USAGE}
+Update a ClickUp task description from a markdown file.
+
+positional arguments:
+  FILE             Markdown file to upload
+
+options:
+  -h, --help       show this help message and exit
+  --task-id ID     ClickUp task ID or task URL
+  --team-id ID     ClickUp team/workspace ID
+  --no-rich-links  Do not rewrite bare ClickUp/Figma URLs into Markdown
+                   links/previews
+
+examples:
+  clickup-update-task notes.md
+  clickup-update-task --task-id OOLE-523 notes.md
+  clickup-update-task --task-id OOLE-523 --team-id 1234567890 notes.md
+  clickup-update-task notes.md --no-rich-links
+
+metadata:
+  When no task ID is provided, the destination is read from front matter:
+    ---
+    clickup-task-id: OOLE-523
+    ---
+
+  For custom task IDs, set CLICKUP_TEAM_ID in .env, or override with:
+    clickup-team-id: 1234567890
+
+authentication:
+  export CLICKUP_API_TOKEN=pk_...
+  https://app.clickup.com/settings/apps
+`;
+
+export const CLI: CliSpec = {
+  prog: PROG,
+  usage: USAGE,
+  help: HELP,
+  maxPositionals: 1,
+  options: {
+    help: { type: "boolean", short: "h" },
+    "task-id": { type: "string" },
+    "team-id": { type: "string" },
+    "no-rich-links": { type: "boolean" },
+  },
+};
+
+/** Parse a ClickUp task ID from an ID string or task URL. */
+export function parseTaskId(value: string): string {
+  const stripped = value.trim();
+  const match = TASK_URL_RE.exec(stripped);
+  if (match) return pyUnquote(match[1]!);
+  return stripped;
+}
+
+/** Return whether a task ID looks like a ClickUp custom task ID. */
+export function isCustomTaskId(taskId: string): boolean {
+  return CUSTOM_TASK_ID_RE.test(taskId.trim());
+}
+
+/** Resolve the task destination from CLI args, metadata, and environment. */
+export function resolveDestination(
+  markdownFile: string,
+  { taskId = "", teamId = "" }: { taskId?: string; teamId?: string } = {},
+): TaskDestination {
+  let metadata: Record<string, string> = {};
+  if (!taskId || !teamId) {
+    [metadata] = parseFrontMatter(readMarkdown(markdownFile));
+  }
+
+  const resolvedTaskId = parseTaskId(taskId || metadata["clickup-task-id"] || "");
+  if (!resolvedTaskId) {
+    throw new ValueError(
+      `No clickup-task-id metadata found in ${pyRepr(markdownFile)}. ` +
+        "Add front matter like: clickup-task-id: OOLE-523",
+    );
+  }
+
+  const customTaskId = isCustomTaskId(resolvedTaskId);
+  const resolvedTeamId =
+    teamId.trim() || (metadata["clickup-team-id"] ?? "").trim() || getEnvValue("CLICKUP_TEAM_ID").trim();
+  if (customTaskId && !resolvedTeamId) {
+    throw new ValueError(
+      "CLICKUP_TEAM_ID is required when using a custom task ID. " +
+        "Add CLICKUP_TEAM_ID=1234567890 to .env or pass --team-id.",
+    );
+  }
+
+  return taskDestination(resolvedTaskId, resolvedTeamId, customTaskId);
+}
+
+/** Build a browser URL for a ClickUp task. */
+export function buildTaskUrl(taskId: string, teamId = ""): string {
+  if (teamId) return `https://app.clickup.com/t/${teamId}/${taskId}`;
+  return `https://app.clickup.com/t/${taskId}`;
+}
+
+/** Build the ClickUp query string for custom task IDs. */
+export function taskQuery(destination: TaskDestination): string {
+  if (!destination.customTaskId) return "";
+  return `?${pyUrlencode({ custom_task_ids: "true", team_id: destination.teamId })}`;
+}
+
+function jsonHeaders(apiToken: string, withBody: boolean): Record<string, string> {
+  return withBody
+    ? { Authorization: apiToken, "Content-Type": "application/json", Accept: "application/json" }
+    : { Authorization: apiToken, Accept: "application/json" };
+}
+
+/** Fetch a ClickUp task. */
+export async function getTask(destination: TaskDestination, apiToken: string): Promise<unknown> {
+  const url = `https://api.clickup.com/api/v2/task/${destination.taskId}${taskQuery(destination)}`;
+  return parseJson(await httpRequest(url, { headers: jsonHeaders(apiToken, false), timeoutMs: 15_000 }));
+}
+
+/** Extract the internal task ID from a ClickUp task response. */
+export function extractInternalTaskId(task: unknown, fallback: string): string {
+  const value = isDict(task) ? task.id : undefined;
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return fallback;
+}
+
+/** Resolve custom task IDs to internal task IDs for attachment uploads. */
+export async function resolveAttachmentDestination(
+  destination: TaskDestination,
+  apiToken: string,
+): Promise<TaskDestination> {
+  if (!destination.customTaskId) return destination;
+
+  const task = await getTask(destination, apiToken);
+  return taskDestination(extractInternalTaskId(task, destination.taskId), destination.teamId, false);
+}
+
+/** Call the ClickUp API to replace a task description with Markdown content. */
+export async function updateTaskDescription(
+  destination: TaskDestination,
+  content: string,
+  apiToken: string,
+  name: string | null = null,
+): Promise<unknown> {
+  const url = `https://api.clickup.com/api/v2/task/${destination.taskId}${taskQuery(destination)}`;
+  const payload: Record<string, string> = { markdown_content: content };
+  if (name) payload.name = name;
+
+  const body = await httpRequest(url, {
+    method: "PUT",
+    headers: jsonHeaders(apiToken, true),
+    body: JSON.stringify(payload),
+  });
+  return body ? parseJson(body) : {};
+}
+
+/** Set a single custom field value on a ClickUp task. */
+export async function setTaskCustomField(
+  destination: TaskDestination,
+  fieldId: string,
+  value: string,
+  apiToken: string,
+): Promise<unknown> {
+  const url = `https://api.clickup.com/api/v2/task/${destination.taskId}/field/${fieldId}${taskQuery(destination)}`;
+  const body = await httpRequest(url, {
+    method: "POST",
+    headers: jsonHeaders(apiToken, true),
+    body: JSON.stringify({ value }),
+  });
+  return body ? parseJson(body) : {};
+}
+
+/** Upload one local file to a ClickUp task and return its public URL. */
+export async function uploadTaskAttachment(
+  destination: TaskDestination,
+  filePath: string,
+  apiToken: string,
+): Promise<string> {
+  const boundary = `----clickup-tools-${randomUUID().replace(/-/g, "")}`;
+  const body = buildMultipartBody(filePath, boundary);
+  const url = `https://api.clickup.com/api/v2/task/${destination.taskId}/attachment`;
+  const response = await httpRequest(url, {
+    method: "POST",
+    headers: {
+      Authorization: apiToken,
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      Accept: "application/json",
+    },
+    body,
+  });
+
+  const attachmentUrl = extractAttachmentUrl(parseJson(response));
+  if (!attachmentUrl) {
+    throw new ValueError(`ClickUp did not return an attachment URL for ${filePath}`);
+  }
+  return attachmentUrl;
+}
+
+/** Build a multipart/form-data body for ClickUp attachment upload. */
+export function buildMultipartBody(filePath: string, boundary: string): Buffer {
+  const filename = path.basename(filePath);
+  const header =
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="attachment"; filename="${escapeHeaderValue(filename)}"\r\n` +
+    `Content-Type: ${guessMimeType(filename)}\r\n` +
+    "\r\n";
+  const footer = `\r\n--${boundary}--\r\n`;
+  return Buffer.concat([Buffer.from(header, "utf8"), fs.readFileSync(filePath), Buffer.from(footer, "utf8")]);
+}
+
+/** Escape a value used in a multipart header parameter. */
+export function escapeHeaderValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/** Extract a usable URL from likely ClickUp attachment response shapes. */
+export function extractAttachmentUrl(payload: unknown): string {
+  if (!isDict(payload)) return "";
+
+  const candidates: Record<string, unknown>[] = [payload];
+  for (const key of ["attachment", "data"]) {
+    const nested = payload[key];
+    if (isDict(nested)) candidates.push(nested);
+  }
+  const attachments = payload.attachments;
+  if (Array.isArray(attachments)) {
+    candidates.push(...attachments.filter(isDict));
+  }
+
+  for (const candidate of candidates) {
+    for (const key of ["url", "download_url", "attachment_url", "thumb_url"]) {
+      const value = candidate[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return "";
+}
+
+/** Read Markdown, upload local references, and prepare the task description. */
+export async function prepareMarkdownTaskContent(
+  markdownPath: string,
+  apiToken: string,
+  destination: TaskDestination,
+  { richLinks = true }: { richLinks?: boolean } = {},
+): Promise<PreparedTaskContent> {
+  const [metadata, body] = parseFrontMatter(readMarkdown(markdownPath));
+  let [title, content] = extractTitle(body);
+  const outcome = (metadata.outcome ?? "").trim() || null;
+  const markdownDir = path.dirname(markdownPath);
+  const attachments = findLocalAttachmentReferences(content, markdownDir);
+
+  const missing = attachments.filter((attachment) => !isFile(attachment.path));
+  if (missing.length) {
+    const missingText = missing.map((item) => `  ${item.target} -> ${item.path}`).join("\n");
+    throw new FileNotFoundError(`Referenced attachment file not found:\n${missingText}`);
+  }
+
+  const uploaded = new Map<string, string>();
+  if (attachments.length) {
+    const uploadDestination = await resolveAttachmentDestination(destination, apiToken);
+    for (const attachment of attachments) {
+      const resolvedPath = pyResolve(attachment.path);
+      if (!uploaded.has(resolvedPath)) {
+        uploaded.set(resolvedPath, await uploadTaskAttachment(uploadDestination, resolvedPath, apiToken));
+      }
+    }
+    content = rewriteLocalAttachmentReferences(content, markdownDir, uploaded);
+  }
+
+  let normalizedLinks = 0;
+  if (richLinks) {
+    [content, normalizedLinks] = await linkifyBareUrls(content, createLinkContext(apiToken));
+  }
+
+  return { content, attachments, uploadedAttachments: uploaded, title, outcome, normalizedLinks };
+}
+
+/** Find local Markdown file references to upload as task attachments. */
+export function findLocalAttachmentReferences(content: string, markdownDir: string): LocalAttachment[] {
+  const refs: LocalAttachment[] = [];
+  const seen = new Set<string>();
+
+  for (const match of content.matchAll(new RegExp(MARKDOWN_LINK_OR_IMAGE_SOURCE, "g"))) {
+    const rawTarget = normalizeMarkdownUrl(match[2]!);
+    if (!isLocalAssetReference(rawTarget)) continue;
+
+    const assetPath = resolveAssetPath(rawTarget, markdownDir);
+    const key = `${rawTarget}\0${pathExists(assetPath) ? pyResolve(assetPath) : assetPath}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    refs.push({ target: rawTarget, path: assetPath });
+  }
+  return refs;
+}
+
+/** Rewrite local Markdown references to uploaded ClickUp attachment URLs. */
+export function rewriteLocalAttachmentReferences(
+  content: string,
+  markdownDir: string,
+  uploaded: Map<string, string>,
+): string {
+  return content.replace(
+    new RegExp(MARKDOWN_LINK_OR_IMAGE_SOURCE, "g"),
+    (whole: string, opening: string, target: string, closing: string) => {
+      const rawTarget = normalizeMarkdownUrl(target);
+      if (!isLocalAssetReference(rawTarget)) return whole;
+
+      const uploadedUrl = uploaded.get(pyResolve(resolveAssetPath(rawTarget, markdownDir)));
+      if (!uploadedUrl) return whole;
+      return `${opening}<${uploadedUrl}>${closing}`;
+    },
+  );
+}
+
+/** Run the CLI and return a process exit code. */
+export async function run(argv: readonly string[], io: Output = processOutput): Promise<number> {
+  const parsed = parseCli(CLI, argv, io);
+  if (typeof parsed === "number") return parsed;
+
+  const file = parsed.positionals[0];
+  const noRichLinks = flagOption(parsed, "no-rich-links");
+  if (!file) {
+    io.stdout(HELP);
+    return 0;
+  }
+
+  const apiToken = getApiToken();
+  if (!apiToken) {
+    printMissingTokenHelp(io);
+    return 1;
+  }
+
+  let destination: TaskDestination;
+  try {
+    destination = resolveDestination(file, {
+      taskId: stringOption(parsed, "task-id"),
+      teamId: stringOption(parsed, "team-id"),
+    });
+  } catch (error) {
+    if (error instanceof FileNotFoundError || error instanceof ValueError) {
+      err(io, error.message);
+      return 1;
+    }
+    throw error;
+  }
+
+  let prepared: PreparedTaskContent;
+  try {
+    prepared = await prepareMarkdownTaskContent(file, apiToken, destination, { richLinks: !noRichLinks });
+  } catch (error) {
+    if (error instanceof FileNotFoundError || error instanceof ValueError) {
+      err(io, error.message);
+      return 1;
+    }
+    if (error instanceof HttpError) return reportHttpError(error, io);
+    if (error instanceof NetworkError) {
+      err(io, `Network error: ${error.reason}`);
+      return 1;
+    }
+    throw error;
+  }
+
+  info(io, `File        : ${pyResolve(file)} (${formatThousands(pyLen(prepared.content))} chars)`);
+  if (destination.customTaskId) {
+    info(io, `Target      : task=${destination.taskId}  team=${destination.teamId}`);
+  } else {
+    info(io, `Target      : task=${destination.taskId}`);
+  }
+  info(io, `Attachments : uploaded=${prepared.uploadedAttachments.size}`);
+  if (prepared.title) {
+    info(io, `Title       : ${prepared.title}`);
+  }
+  if (prepared.outcome) {
+    const ellipsis = pyLen(prepared.outcome) > 100 ? "..." : "";
+    info(io, `Outcome     : ${pySlice(prepared.outcome, 0, 100)}${ellipsis}`);
+  }
+  for (const [uploadedPath, url] of prepared.uploadedAttachments) {
+    info(io, `Attachment  : ${path.basename(uploadedPath)} -> ${url}`);
+  }
+  if (!noRichLinks) {
+    info(io, `Links       : normalized=${prepared.normalizedLinks}`);
+  }
+  print(io);
+
+  try {
+    await updateTaskDescription(destination, prepared.content, apiToken, prepared.title);
+  } catch (error) {
+    if (error instanceof HttpError) return reportHttpError(error, io);
+    if (error instanceof NetworkError) {
+      err(io, `Network error: ${error.reason}`);
+      return 1;
+    }
+    err(io, `Unexpected error: ${errorMessage(error)}`);
+    return 1;
+  }
+
+  if (prepared.outcome) {
+    const outcomeFieldId = getEnvValue("CLICKUP_OUTCOME_FIELD_ID").trim() || DEFAULT_OUTCOME_FIELD_ID;
+    try {
+      await setTaskCustomField(destination, outcomeFieldId, prepared.outcome, apiToken);
+      ok(io, `Outcome field updated (${outcomeFieldId})`);
+    } catch (error) {
+      if (error instanceof HttpError) return reportHttpError(error, io);
+      if (error instanceof NetworkError) {
+        err(io, `Network error: ${error.reason}`);
+        return 1;
+      }
+      err(io, `Unexpected error setting outcome: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
+
+  print(io);
+  ok(io, "Task description updated");
+  ok(io, `URL: ${BOLD}${buildTaskUrl(destination.taskId, destination.teamId)}${RESET}`);
+  return 0;
+}
+
+/** CLI entry point. */
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  process.exitCode = await run(argv);
+}

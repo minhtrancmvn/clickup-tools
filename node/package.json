@@ -1,0 +1,53 @@
+{
+  "name": "@kaishj91/clickup-tools-mcp",
+  "version": "0.1.0",
+  "description": "MCP server and CLI tools for ClickUp: update Doc pages and task descriptions from Markdown, read task details, and post tasks to Telegram.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "clickup",
+    "claude",
+    "markdown",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/minhtrancmvn/clickup-tools.git",
+    "directory": "node"
+  },
+  "type": "module",
+  "bin": {
+    "clickup-tools-mcp": "dist/bin/clickup-mcp-server.js",
+    "clickup-mcp-server": "dist/bin/clickup-mcp-server.js",
+    "clickup-update-page": "dist/bin/clickup-update-page.js",
+    "clickup-update-task": "dist/bin/clickup-update-task.js",
+    "clickup-read-task": "dist/bin/clickup-read-task.js",
+    "clickup-send-telegram": "dist/bin/clickup-send-telegram.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
+  }
+}

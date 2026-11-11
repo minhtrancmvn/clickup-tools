@@ -18,3 +18,7 @@ dist/
 # macOS
 .DS_Store
 .gitnexus
+
+# Node
+node_modules/
+*.tgz

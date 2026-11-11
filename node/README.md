@@ -1,0 +1,194 @@
+# ClickUp Tools MCP
+
+MCP server and command-line tools for ClickUp workflows: update Doc pages and task descriptions from Markdown, read task details as AI-ready JSON, and post task lists to Telegram.
+
+This is the Node.js/TypeScript build of [clickup-tools](https://github.com/minhtrancmvn/clickup-tools). It behaves the same as the Python package, with the same tools, arguments, output and `.env` handling, and needs no Python install.
+
+Requires Node.js 20 or newer.
+
+## Credentials
+
+Put your ClickUp credentials in a `.env` file:
+
+```sh
+CLICKUP_API_TOKEN=pk_your_personal_api_token
+CLICKUP_TEAM_ID=your_team_id
+```
+
+Get a personal API token at https://app.clickup.com/settings/apps. `CLICKUP_TEAM_ID` is needed for custom task IDs such as `OOLE-523`; internal task IDs work without it.
+
+## MCP setup
+
+The server speaks MCP over stdio and exposes three tools: `update_clickup_page`, `update_clickup_task` and `read_clickup_task`. Point it at your `.env` with `--env-file`.
+
+### Claude Code
+
+```sh
+claude mcp add clickup-tools -- npx -y @kaishj91/clickup-tools-mcp --env-file /absolute/path/to/.env
+```
+
+### VS Code / GitHub Copilot
+
+`.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "clickup-tools": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@kaishj91/clickup-tools-mcp", "--env-file", "${workspaceFolder}/.env"]
+    }
+  }
+}
+```
+
+### Codex CLI
+
+```sh
+codex mcp add clickup-tools -- npx -y @kaishj91/clickup-tools-mcp --env-file /absolute/path/to/.env
+```
+
+### Claude Desktop and other clients
+
+```json
+{
+  "mcpServers": {
+    "clickup-tools": {
+      "command": "npx",
+      "args": ["-y", "@kaishj91/clickup-tools-mcp", "--env-file", "/absolute/path/to/.env"]
+    }
+  }
+}
+```
+
+The first `npx` start downloads the package. To start faster, install it globally with `npm install -g @kaishj91/clickup-tools-mcp` and use `clickup-tools-mcp` as the command.
+
+### Tools
+
+| Tool | Arguments |
+| --- | --- |
+| `update_clickup_page` | `file_path` (required), `no_open` (default `true`), `allow_local_media` (default `false`) |
+| `update_clickup_task` | `file_path` (required), `task_id`, `team_id`, `no_rich_links` (default `false`) |
+| `read_clickup_task` | `task_id` (falls back to `CLICKUP_TASK_ID`), `team_id`, `include_comments` (default `false`), `comment_limit` (1-25, default `20`) |
+
+Pass absolute Markdown paths to the update tools. `read_clickup_task` returns the same JSON document as `clickup-read-task --json`. Each tool returns text that starts with `Success.` or `Error (exit code N).` followed by the command output.
+
+## Command-line tools
+
+Install globally to get the commands on your `PATH`:
+
+```sh
+npm install -g @kaishj91/clickup-tools-mcp
+```
+
+Or run one without installing:
+
+```sh
+npx -y -p @kaishj91/clickup-tools-mcp clickup-read-task --help
+```
+
+Every command takes `--help`. The CLIs read credentials from the environment or from `.env` in the current directory.
+
+### `clickup-update-page`
+
+Updates a ClickUp Doc page from a Markdown file.
+
+```sh
+clickup-update-page notes.md
+clickup-update-page 'https://app.clickup.com/123/v/dc/doc-id/page-id' notes.md
+clickup-update-page --workspace-id 123 --doc-id doc-id --page-id page-id notes.md
+clickup-update-page notes.md --append        # or --prepend; default replaces
+clickup-update-page notes.md --no-open       # do not open the page afterwards
+clickup-update-page notes.md --no-rich-links
+clickup-update-page notes.md --allow-local-media
+```
+
+Supported URLs are `https://app.clickup.com/{workspace_id}/v/dc/{doc_id}/{page_id}` and `https://app.clickup.com/{workspace_id}/docs/{doc_id}/{page_id}`. With a `clickup-page` front matter field, only the file path is needed. The first `# Heading` line becomes the page title and is removed from the body.
+
+### `clickup-update-task`
+
+Replaces a task description with the Markdown body.
+
+```sh
+clickup-update-task task.md
+clickup-update-task --task-id OOLE-523 task.md
+clickup-update-task --task-id OOLE-523 --team-id your_team_id task.md
+clickup-update-task task.md --no-rich-links
+```
+
+The first `# Heading` line becomes the task name and is removed from the description. Local image and file links such as `![flow](flow.gif)` are uploaded as task attachments and rewritten to the attachment URLs. Existing attachments are not reused, so rerunning can create duplicates.
+
+### `clickup-read-task`
+
+Prints the title, status, description, time estimate, tracked time, tags, the `Outcome` custom field, time entries, checklists and the full subtask tree. Subtasks are fetched recursively, up to 10 levels deep.
+
+```sh
+clickup-read-task OOLE-523
+clickup-read-task 'https://app.clickup.com/t/your_team_id/OOLE-523'
+clickup-read-task --task-id OOLE-523 --json
+clickup-read-task --task-id OOLE-523 --json --include-comments --comment-limit 10
+```
+
+With no task given, it reads `CLICKUP_TASK_ID`. `--json` prints a single JSON object with `title`, `status`, `description`, `time_estimate`, `tracked_time`, `tags`, `outcome`, `checklists`, `time_entries`, `has_subtasks`, `subtask_count`, `subtasks`, `url` and, with `--include-comments`, `comments`.
+
+### `clickup-send-telegram`
+
+Sends one Telegram message through a bot: an optional intro line, then one numbered line per task, with the task ID linked to ClickUp.
+
+```sh
+clickup-send-telegram chats                                    # list chat and topic IDs the bot can see
+clickup-send-telegram send OOLE-546 OOLE-547 --intro "@developer" --dry-run
+clickup-send-telegram send OOLE-546 OOLE-547 --intro "@developer"
+clickup-send-telegram send OOLE-546 --chat-id 123456789 --thread-id 21
+```
+
+A bot can only message someone who has opened it and pressed Start. In a group, post `/start@your_bot` first. The bot token is never printed.
+
+## Configuration
+
+| Variable | Used for |
+| --- | --- |
+| `CLICKUP_API_TOKEN` | All ClickUp requests (required) |
+| `CLICKUP_TEAM_ID` | Custom task IDs |
+| `CLICKUP_TASK_ID` | Default task for `clickup-read-task` / `read_clickup_task` |
+| `CLICKUP_OUTCOME_FIELD_ID` | ID of the `Outcome` custom field, if yours differs from the default |
+| `TELEGRAM_BOT_TOKEN` | `clickup-send-telegram` |
+| `TELEGRAM_CHAT_ID` | Default chat for `clickup-send-telegram send` |
+| `TELEGRAM_THREAD_ID` | Default forum topic; omit to post in General |
+| `CLICKUP_TOOLS_ENV_FILE` | Extra `.env` path to check (set by `--env-file`) |
+
+A variable set in the environment wins. Otherwise the file in `CLICKUP_TOOLS_ENV_FILE` is checked first, then `./.env`.
+
+Markdown front matter routes a file to its destination and is never uploaded:
+
+```markdown
+---
+clickup-page: https://app.clickup.com/123/v/dc/doc-id/page-id
+clickup-task-id: OOLE-523
+clickup-team-id: 1234567890
+outcome: Fixed and deployed
+---
+```
+
+`clickup-page` is read by `clickup-update-page`. `clickup-task-id`, `clickup-team-id` and `outcome` are read by `clickup-update-task`; `outcome` also sets the task's `Outcome` custom field.
+
+## Markdown preparation
+
+- Bare ClickUp URLs become Markdown links. Doc page links are titled with the page name when it can be fetched; others are labelled "ClickUp page".
+- Bare Figma URLs become Markdown links; a Figma URL alone on a line becomes a linked preview image when Figma provides one. `--no-rich-links` turns both off.
+- Code blocks, inline code and existing links are left alone.
+- The ClickUp Docs API cannot upload files, so `clickup-update-page` stops when the Markdown references local media. Use hosted URLs, or pass `--allow-local-media` to upload anyway.
+
+## Development
+
+```sh
+npm install
+npm run typecheck
+npm test
+npm run build
+```
+
+## License
+
+MIT
