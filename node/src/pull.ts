@@ -33,7 +33,8 @@ import {
   type Output,
 } from "./common.js";
 import { getApiToken, getEnvValue } from "./env.js";
-import { extractOutcomeValue, extractStatus, resolveDestination, stringValue } from "./read-task.js";
+import { renderChecklistSection } from "./checklists.js";
+import { extractChecklists, extractOutcomeValue, extractStatus, resolveDestination, stringValue } from "./read-task.js";
 import { buildPageUrl, getPage, parsePageUrl } from "./update-page.js";
 import { DEFAULT_OUTCOME_FIELD_ID, isCustomTaskId, type TaskDestination } from "./update-task.js";
 
@@ -132,8 +133,11 @@ export function taskToMarkdown(task: Json, destination: TaskDestination, outcome
     typeof task.markdown_description === "string" && task.markdown_description.trim()
       ? task.markdown_description
       : stringValue(task.description);
+  // Checklists come back as `## Checklist: Name` sections, which update-task syncs.
+  const sections = extractChecklists(task).map((checklist) => renderChecklistSection(checklist).trimEnd());
+  const body = [description.trimEnd(), ...sections].filter(Boolean).join("\n\n");
   const title = stringValue(task.name) || "Untitled";
-  return { markdown: buildMarkdownFile(front, title, description), title, notes };
+  return { markdown: buildMarkdownFile(front, title, body), title, notes };
 }
 
 /** Write a pulled file, refusing to replace an existing one unless asked. */

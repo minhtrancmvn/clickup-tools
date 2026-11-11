@@ -309,6 +309,86 @@ export function parseFrontMatter(content: string): [Record<string, string>, stri
   return [metadata, lines.slice(closingIndex + 1).join("")];
 }
 
+/**
+ * Set front matter keys in a Markdown file, replacing existing lines for the
+ * same keys or adding them before the closing `---` (creating the block when
+ * the file has none). The file's line ending style is kept.
+ */
+export function setFrontMatterValues(filePath: string, entries: Array<[string, string]>): void {
+  const raw = fs.readFileSync(filePath, "utf8");
+  const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+  const lines = raw.split(/\r?\n/);
+  const newLines = (pending: Array<[string, string]>) => pending.map(([key, value]) => `${key}: ${value}`);
+
+  const closing = lines[0]?.trim() === "---" ? lines.findIndex((line, index) => index > 0 && line.trim() === "---") : -1;
+  if (closing === -1) {
+    fs.writeFileSync(filePath, ["---", ...newLines(entries), "---", ""].join(eol) + raw, "utf8");
+    return;
+  }
+
+  const pending = new Map(entries);
+  for (let index = 1; index < closing; index++) {
+    const key = lines[index]!.split(":", 1)[0]!.trim();
+    if (pending.has(key)) {
+      lines[index] = `${key}: ${pending.get(key)}`;
+      pending.delete(key);
+    }
+  }
+  lines.splice(closing, 0, ...newLines([...pending]));
+  fs.writeFileSync(filePath, lines.join(eol), "utf8");
+}
+
+const DOC_URL_RE = /app\.clickup\.com\/([^/]+)\/(?:v\/dc|docs)\/([^/?#]+)/;
+
+/** Return [workspaceId, docId] from a ClickUp Doc URL (with or without a page). */
+export function parseDocUrl(url: string): [string, string] {
+  const match = DOC_URL_RE.exec(url);
+  if (!match) {
+    throw new ValueError(
+      `Cannot parse ClickUp Doc URL: ${pyRepr(url)}\nExpected: https://app.clickup.com/<workspace_id>/v/dc/<doc_id>`,
+    );
+  }
+  return [match[1]!, match[2]!];
+}
+
+/** Where a new page goes: the Doc from clickup-doc, optionally under clickup-parent-page. */
+export interface CreatePageTarget {
+  workspaceId: string;
+  docId: string;
+  parentPageId: string;
+}
+
+/** A create target when front matter has clickup-doc but no clickup-page; otherwise null. */
+export function readCreatePageTarget(filePath: string): CreatePageTarget | null {
+  const [metadata] = parseFrontMatter(readMarkdown(filePath));
+  if (metadata["clickup-page"] || !metadata["clickup-doc"]) return null;
+  const [workspaceId, docId] = parseDocUrl(metadata["clickup-doc"]);
+  const parent = (metadata["clickup-parent-page"] ?? "").trim();
+  return { workspaceId, docId, parentPageId: parent.startsWith("http") ? parsePageUrl(parent)[2] : parent };
+}
+
+/** Create a page in a Doc and return its ID. */
+export async function createPage(
+  target: CreatePageTarget,
+  page: { name: string; content: string; subTitle: string | null },
+  apiToken: string,
+): Promise<string> {
+  const data: Record<string, unknown> = { name: page.name, content: page.content, content_format: "text/md" };
+  if (page.subTitle) data.sub_title = page.subTitle;
+  if (target.parentPageId) data.parent_page_id = target.parentPageId;
+  const body = await httpRequest(`https://api.clickup.com/api/v3/workspaces/${target.workspaceId}/docs/${target.docId}/pages`, {
+    method: "POST",
+    headers: { Authorization: apiToken, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(data),
+  });
+  const created = body ? parseJson(body) : {};
+  const id = [created, isDict(created) ? created.page : null, isDict(created) ? created.data : null]
+    .map((candidate) => (isDict(candidate) && typeof candidate.id === "string" ? candidate.id.trim() : ""))
+    .find(Boolean);
+  if (!id) throw new ValueError("ClickUp did not return the new page ID.");
+  return id;
+}
+
 /** Read clickup-page front matter from a Markdown file. */
 export function readClickupPageFromMetadata(filePath: string): [string, string, string] {
   const [metadata] = parseFrontMatter(readMarkdown(filePath));
@@ -657,8 +737,16 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
   let docId: string;
   let pageId: string;
   let markdownFile: string;
+  let createTarget: CreatePageTarget | null = null;
   try {
-    [workspaceId, docId, pageId, markdownFile] = resolveArgs(args);
+    // A file with clickup-doc but no clickup-page creates a new page in that Doc.
+    const fileOnly = !args.file && !args.urlOrFile.startsWith("http") && !(args.workspaceId && args.docId && args.pageId);
+    createTarget = fileOnly ? readCreatePageTarget(args.urlOrFile) : null;
+    if (createTarget) {
+      [workspaceId, docId, pageId, markdownFile] = [createTarget.workspaceId, createTarget.docId, "", args.urlOrFile];
+    } else {
+      [workspaceId, docId, pageId, markdownFile] = resolveArgs(args);
+    }
   } catch (error) {
     if (error instanceof FileNotFoundError || error instanceof ValueError) {
       err(io, error.message);
@@ -686,7 +774,12 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
 
   const content = prepared.content;
   info(io, `File   : ${pyResolve(markdownFile)} (${formatThousands(pyLen(content))} chars)`);
-  info(io, `Target : workspace=${workspaceId}  doc=${docId}  page=${pageId}`);
+  if (createTarget) {
+    const parent = createTarget.parentPageId ? `  parent=${createTarget.parentPageId}` : "";
+    info(io, `Target : workspace=${workspaceId}  doc=${docId}  (new page${parent})`);
+  } else {
+    info(io, `Target : workspace=${workspaceId}  doc=${docId}  page=${pageId}`);
+  }
   info(io, `Media  : local_refs=${prepared.localMediaRefs.length}`);
   for (const localRef of prepared.localMediaRefs) {
     info(io, `Local  : ${localRef}`);
@@ -702,7 +795,7 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
   }
 
   const editMode = getEditMode(options);
-  info(io, `Mode   : ${editMode}`);
+  info(io, `Mode   : ${createTarget ? "create" : editMode}`);
 
   const [title, body] = extractTitle(content);
   if (title) {
@@ -711,10 +804,27 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
   if (prepared.subtitle) {
     info(io, `Subtitle: ${prepared.subtitle}`);
   }
+  if (createTarget && !title) {
+    err(io, "A new page needs a name: start the Markdown with a `# Page name` heading.");
+    return 1;
+  }
   print(io);
 
   try {
-    await updatePage(workspaceId, docId, pageId, body, apiToken, editMode, title, prepared.subtitle);
+    if (createTarget) {
+      pageId = await createPage(createTarget, { name: title!, content: body, subTitle: prepared.subtitle }, apiToken);
+      // Record the page first so a re-run updates it instead of creating another.
+      const newUrl = buildPageUrl(workspaceId, docId, pageId);
+      try {
+        setFrontMatterValues(markdownFile, [["clickup-page", newUrl]]);
+      } catch (writeError) {
+        err(io, `Page created at ${newUrl}, but saving clickup-page to ${markdownFile} failed: ${errorMessage(writeError)}`);
+        err(io, "Add that clickup-page line to the front matter yourself before running again.");
+        return 1;
+      }
+    } else {
+      await updatePage(workspaceId, docId, pageId, body, apiToken, editMode, title, prepared.subtitle);
+    }
   } catch (error) {
     if (error instanceof HttpError) return reportHttpError(error, io);
     if (error instanceof NetworkError) {
@@ -727,7 +837,12 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
 
   const pageUrl = buildPageUrl(workspaceId, docId, pageId);
   print(io);
-  ok(io, `Page updated (${editMode})`);
+  if (createTarget) {
+    ok(io, "Page created");
+    ok(io, `Saved clickup-page to ${markdownFile}`);
+  } else {
+    ok(io, `Page updated (${editMode})`);
+  }
   ok(io, `URL: ${BOLD}${pageUrl}${RESET}`);
 
   if (!options.noOpen) {
