@@ -86,7 +86,7 @@ The first `npx` start downloads the package. To start faster, install it globall
 | --- | --- |
 | `update_clickup_page` | `file_path` (required), `no_open` (default `true`), `allow_local_media` (default `false`) |
 | `update_clickup_task` | `file_path` (required), `task_id`, `team_id`, `no_rich_links` (default `false`) |
-| `read_clickup_task` | `task_id` (falls back to `CLICKUP_TASK_ID`), `team_id`, `include_comments` (default `false`), `comment_limit` (1-25, default `20`) |
+| `read_clickup_task` | `task_id` (falls back to `CLICKUP_TASK_ID`), `team_id`, `include_comments` (default `false`), `include_replies` (default `false`), `comment_limit` (1-100, default `20`) |
 
 Pass absolute Markdown paths to the update tools. `read_clickup_task` returns the same JSON document as `clickup-read-task --json`. Each tool returns text that starts with `Success.` or `Error (exit code N).` followed by the command output.
 
@@ -120,7 +120,7 @@ clickup-update-page notes.md --no-rich-links
 clickup-update-page notes.md --allow-local-media
 ```
 
-Supported URLs are `https://app.clickup.com/{workspace_id}/v/dc/{doc_id}/{page_id}` and `https://app.clickup.com/{workspace_id}/docs/{doc_id}/{page_id}`. With a `clickup-page` front matter field, only the file path is needed. The first `# Heading` line becomes the page title and is removed from the body.
+Supported URLs are `https://app.clickup.com/{workspace_id}/v/dc/{doc_id}/{page_id}` and `https://app.clickup.com/{workspace_id}/docs/{doc_id}/{page_id}`. With a `clickup-page` front matter field, only the file path is needed. The first `# Heading` line becomes the page title and is removed from the body, and a `subtitle` front matter field sets the page subtitle.
 
 ### `clickup-update-task`
 
@@ -133,20 +133,23 @@ clickup-update-task --task-id OOLE-523 --team-id your_team_id task.md
 clickup-update-task task.md --no-rich-links
 ```
 
-The first `# Heading` line becomes the task name and is removed from the description. Local image and file links such as `![flow](flow.gif)` are uploaded as task attachments and rewritten to the attachment URLs. Existing attachments are not reused, so rerunning can create duplicates.
+The first `# Heading` line becomes the task name and is removed from the description. Local image and file links such as `![flow](flow.gif)` are uploaded as task attachments and rewritten to the attachment URLs. A file that is already attached to the task with the same name and size is reused instead of uploaded again.
+
+Front matter can also set task fields: `status`, `priority` (`urgent`, `high`, `normal`, `low`, `none` or 1-4), `points`, `time_estimate` (`2h`, `45m`, `1h 30m`), and `start_date` / `due_date` (`2026-11-20` for a date, `2026-11-20 14:00` for a local time, or an ISO timestamp with a time zone). Invalid values stop the update before anything is sent.
 
 ### `clickup-read-task`
 
-Prints the title, status, description, time estimate, tracked time, tags, the `Outcome` custom field, time entries, checklists and the full subtask tree. Subtasks are fetched recursively, up to 10 levels deep.
+Prints the title, status, description (as Markdown), time estimate, tracked time, tags, the `Outcome` custom field, time entries, checklists and the full subtask tree. Subtasks are fetched recursively, up to 10 levels deep; if part of the tree can't be loaded, the affected subtask says so instead of silently showing no children.
 
 ```sh
 clickup-read-task OOLE-523
 clickup-read-task 'https://app.clickup.com/t/your_team_id/OOLE-523'
 clickup-read-task --task-id OOLE-523 --json
 clickup-read-task --task-id OOLE-523 --json --include-comments --comment-limit 10
+clickup-read-task --task-id OOLE-523 --json --include-replies
 ```
 
-With no task given, it reads `CLICKUP_TASK_ID`. `--json` prints a single JSON object with `title`, `status`, `description`, `time_estimate`, `tracked_time`, `tags`, `outcome`, `checklists`, `time_entries`, `has_subtasks`, `subtask_count`, `subtasks`, `url` and, with `--include-comments`, `comments`.
+With no task given, it reads `CLICKUP_TASK_ID`. `--json` prints a single JSON object with `title`, `status`, `description`, `time_estimate`, `tracked_time`, `tags`, `outcome`, `checklists`, `time_entries`, `has_subtasks`, `subtask_count`, `subtasks`, `url` and, with `--include-comments`, `comments`. Each comment has a `reply_count`; `--include-replies` also returns each comment's threaded `replies`. `--comment-limit` accepts 1-100 (ClickUp returns 25 per page, so larger limits make more requests). When part of the subtask tree failed to load, the object has `subtasks_incomplete: true` and the affected subtask a `subtasks_note`.
 
 ### `clickup-send-telegram`
 
@@ -184,10 +187,19 @@ clickup-page: https://app.clickup.com/123/v/dc/doc-id/page-id
 clickup-task-id: OOLE-523
 clickup-team-id: 1234567890
 outcome: Fixed and deployed
+subtitle: Draft for review
+status: in progress
+priority: high
+points: 3
+time_estimate: 1h 30m
+start_date: 2026-11-20
+due_date: 2026-11-25 17:00
 ---
 ```
 
-`clickup-page` is read by `clickup-update-page`. `clickup-task-id`, `clickup-team-id` and `outcome` are read by `clickup-update-task`; `outcome` also sets the task's `Outcome` custom field.
+`clickup-page` and `subtitle` are read by `clickup-update-page`. The other keys are read by `clickup-update-task`: `outcome` sets the task's `Outcome` custom field, and `status`, `priority`, `points`, `time_estimate`, `start_date` and `due_date` set those task fields.
+
+All requests honour ClickUp's rate limit: when ClickUp answers HTTP 429, the tools wait for the reset time it reports (up to a minute) and retry, at most twice.
 
 ## Markdown preparation
 

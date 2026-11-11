@@ -28,7 +28,7 @@ import {
 import { taskDestination } from "../src/update-task.js";
 import { jsonResponse, networkFailure, stubFetch, type FetchCall } from "./helpers.js";
 
-const TASK_URL = "https://api.clickup.com/api/v2/task/abc123?include_subtasks=true";
+const TASK_URL = "https://api.clickup.com/api/v2/task/abc123?include_subtasks=true&include_markdown_description=true";
 
 describe("ClickUpReadTaskTests", () => {
   it("parse_task_identifier_from_url_with_team_id", () => {
@@ -225,12 +225,12 @@ describe("ClickUpReadTaskTests", () => {
     expect(args).toMatchObject({ includeComments: false, commentLimit: 20 });
   });
 
-  it("comment_limit_rejects_values_above_api_page_size", async () => {
+  it("comment_limit_rejects_values_above_max", async () => {
     const io = new BufferedOutput();
-    const code = await run(["--comment-limit", "26"], io);
+    const code = await run(["--comment-limit", "101"], io);
 
     expect(code).toBe(2);
-    expect(io.err).toContain("comment limit must be between 1 and 25");
+    expect(io.err).toContain("comment limit must be between 1 and 100");
   });
 
   it("get_task_comments_uses_custom_task_query_and_limit", async () => {
@@ -285,6 +285,9 @@ describe("ClickUpReadTaskTests", () => {
       dateMs: 1568036964079,
       text: "First comment",
       resolved: false,
+      replyCount: 0,
+      replies: [],
+      repliesNote: "",
     };
     details = { ...details, comments: [comment], commentsIncluded: true };
 
@@ -301,6 +304,7 @@ describe("ClickUpReadTaskTests", () => {
         date_ms: 1568036964079,
         text: "First comment",
         resolved: false,
+        reply_count: 0,
       },
     ]);
   });
@@ -469,7 +473,8 @@ describe("ClickUpReadTaskTests", () => {
           customId: "T-B",
           name: "B",
           status: "open",
-          subtasks: [{ taskId: "D", customId: "T-D", name: "D", status: "open", subtasks: [] }],
+          subtasks: [{ taskId: "D", customId: "T-D", name: "D", status: "open", subtasks: [], subtasksNote: "" }],
+          subtasksNote: "",
         },
       ],
     };

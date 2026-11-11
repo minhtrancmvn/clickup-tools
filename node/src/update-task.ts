@@ -28,6 +28,7 @@ import {
   printMissingTokenHelp,
   processOutput,
   pyLen,
+  pyInt,
   pyRepr,
   pyResolve,
   pySlice,
@@ -78,9 +79,152 @@ export interface PreparedTaskContent {
   attachments: LocalAttachment[];
   /** Resolved local path -> uploaded attachment URL, in upload order. */
   uploadedAttachments: Map<string, string>;
+  /** Resolved local path -> URL of an identical file already attached to the task (not re-uploaded). */
+  reusedAttachments: Map<string, string>;
   title: string | null;
   outcome: string | null;
+  /** Task fields from front matter (status, priority, ...), ready for the Update Task payload. */
+  fields: TaskFields;
+  /** The front matter values behind `fields`, for display. */
+  fieldSources: Record<string, string>;
   normalizedLinks: number;
+}
+
+/** Task properties that front matter can set through Update Task. */
+export interface TaskFields {
+  status?: string;
+  priority?: number | null;
+  points?: number;
+  time_estimate?: number;
+  start_date?: number;
+  start_date_time?: boolean;
+  due_date?: number;
+  due_date_time?: boolean;
+}
+
+/** Front matter keys that map to task fields, in display order. */
+export const TASK_FIELD_KEYS = ["status", "priority", "points", "time_estimate", "start_date", "due_date"] as const;
+
+const PRIORITIES: Record<string, number | null> = {
+  urgent: 1,
+  high: 2,
+  normal: 3,
+  low: 4,
+  none: null,
+  "1": 1,
+  "2": 2,
+  "3": 3,
+  "4": 4,
+};
+
+const DURATION_RE = /^(?:(\d+(?:\.\d+)?)\s*h)?\s*(?:(\d+(?:\.\d+)?)\s*m)?$/i;
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const LOCAL_DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/;
+const ZONED_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** Parse "1h 30m", "90m", "1.5h" into milliseconds; throws ValueError. */
+export function parseTimeEstimate(value: string): number {
+  const match = DURATION_RE.exec(value.trim());
+  if (!value.trim() || !match || (match[1] === undefined && match[2] === undefined)) {
+    throw new ValueError(`time_estimate must use hours and/or minutes, e.g. "2h", "45m" or "1h 30m"; got ${pyRepr(value)}`);
+  }
+  const hours = Number(match[1] ?? 0);
+  const minutes = Number(match[2] ?? 0);
+  return Math.round((hours * 60 + minutes) * 60_000);
+}
+
+/**
+ * Parse a front matter date into Unix milliseconds. "YYYY-MM-DD" is a date
+ * without a time (local midnight); "YYYY-MM-DD HH:MM" is local time; ISO
+ * timestamps with Z or an offset are exact. Throws ValueError.
+ */
+export function parseTaskDate(key: string, value: string): { ms: number; hasTime: boolean } {
+  const text = value.trim();
+  const local = (parts: number[], hasTime: boolean) => {
+    const [year, month, day, hour = 0, minute = 0, second = 0] = parts as [number, number, number, number?, number?, number?];
+    const date = new Date(year, month - 1, day, hour, minute, second);
+    const valid =
+      date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day && date.getHours() === hour && date.getMinutes() === minute;
+    return valid ? { ms: date.getTime(), hasTime } : null;
+  };
+
+  let parsed: { ms: number; hasTime: boolean } | null = null;
+  const dateOnly = DATE_ONLY_RE.exec(text);
+  const localTime = LOCAL_DATETIME_RE.exec(text);
+  if (dateOnly) {
+    parsed = local(dateOnly.slice(1).map(Number), false);
+  } else if (localTime) {
+    parsed = local(localTime.slice(1).filter((part) => part !== undefined).map(Number), true);
+  } else if (ZONED_DATETIME_RE.test(text) && !Number.isNaN(Date.parse(text))) {
+    parsed = { ms: Date.parse(text), hasTime: true };
+  }
+  if (!parsed) {
+    throw new ValueError(`${key} must be YYYY-MM-DD, "YYYY-MM-DD HH:MM" or an ISO timestamp; got ${pyRepr(value)}`);
+  }
+  return parsed;
+}
+
+/** Read task fields from front matter; empty values are ignored. Throws ValueError on invalid values. */
+export function parseTaskFields(metadata: Record<string, string>): { fields: TaskFields; sources: Record<string, string> } {
+  const fields: TaskFields = {};
+  const sources: Record<string, string> = {};
+  for (const key of TASK_FIELD_KEYS) {
+    const raw = (metadata[key] ?? "").trim();
+    if (!raw) continue;
+    sources[key] = raw;
+    switch (key) {
+      case "status":
+        fields.status = raw;
+        break;
+      case "priority": {
+        const priority = PRIORITIES[raw.toLowerCase()];
+        if (priority === undefined) {
+          throw new ValueError(`priority must be urgent, high, normal, low, none or 1-4; got ${pyRepr(raw)}`);
+        }
+        fields.priority = priority;
+        break;
+      }
+      case "points":
+        if (!/^\d+(?:\.\d+)?$/.test(raw)) throw new ValueError(`points must be a number; got ${pyRepr(raw)}`);
+        fields.points = Number(raw);
+        break;
+      case "time_estimate":
+        fields.time_estimate = parseTimeEstimate(raw);
+        break;
+      case "start_date":
+      case "due_date": {
+        const { ms, hasTime } = parseTaskDate(key, raw);
+        fields[key] = ms;
+        fields[`${key}_time`] = hasTime;
+        break;
+      }
+    }
+  }
+  return { fields, sources };
+}
+
+/** An attachment already on a task, keyed by file name and byte size. */
+export function attachmentKey(title: string, size: number | string): string {
+  return `${title}\0${size}`;
+}
+
+/**
+ * Map existing task attachments to their URLs by file name and size. Entries
+ * without a size are skipped, so a file is only reused when both match.
+ */
+export function existingAttachmentUrls(task: unknown): Map<string, string> {
+  const urls = new Map<string, string>();
+  const attachments = isDict(task) && Array.isArray(task.attachments) ? task.attachments.filter(isDict) : [];
+  for (const attachment of attachments) {
+    if (attachment.deleted === true) continue;
+    const title = typeof attachment.title === "string" ? attachment.title.trim() : "";
+    const size = pyInt(attachment.size);
+    const url = extractAttachmentUrl(attachment);
+    if (title && size !== null && url && !urls.has(attachmentKey(title, size))) {
+      urls.set(attachmentKey(title, size), url);
+    }
+  }
+  return urls;
 }
 
 export const PROG = "clickup-update-task";
@@ -211,26 +355,16 @@ export function extractInternalTaskId(task: unknown, fallback: string): string {
   return fallback;
 }
 
-/** Resolve custom task IDs to internal task IDs for attachment uploads. */
-export async function resolveAttachmentDestination(
-  destination: TaskDestination,
-  apiToken: string,
-): Promise<TaskDestination> {
-  if (!destination.customTaskId) return destination;
-
-  const task = await getTask(destination, apiToken);
-  return taskDestination(extractInternalTaskId(task, destination.taskId), destination.teamId, false);
-}
-
-/** Call the ClickUp API to replace a task description with Markdown content. */
+/** Call the ClickUp API to replace a task description with Markdown content (plus optional task fields). */
 export async function updateTaskDescription(
   destination: TaskDestination,
   content: string,
   apiToken: string,
   name: string | null = null,
+  fields: TaskFields = {},
 ): Promise<unknown> {
   const url = `https://api.clickup.com/api/v2/task/${destination.taskId}${taskQuery(destination)}`;
-  const payload: Record<string, string> = { markdown_content: content };
+  const payload: Record<string, unknown> = { markdown_content: content, ...fields };
   if (name) payload.name = name;
 
   const body = await httpRequest(url, {
@@ -333,6 +467,7 @@ export async function prepareMarkdownTaskContent(
   const [metadata, body] = parseFrontMatter(readMarkdown(markdownPath));
   let [title, content] = extractTitle(body);
   const outcome = (metadata.outcome ?? "").trim() || null;
+  const { fields, sources: fieldSources } = parseTaskFields(metadata);
   const markdownDir = path.dirname(markdownPath);
   const attachments = findLocalAttachmentReferences(content, markdownDir);
 
@@ -343,15 +478,25 @@ export async function prepareMarkdownTaskContent(
   }
 
   const uploaded = new Map<string, string>();
+  const reused = new Map<string, string>();
   if (attachments.length) {
-    const uploadDestination = await resolveAttachmentDestination(destination, apiToken);
+    // One Get Task gives both the internal ID (needed for uploads) and the existing attachments.
+    const task = await getTask(destination, apiToken);
+    const uploadDestination = destination.customTaskId
+      ? taskDestination(extractInternalTaskId(task, destination.taskId), destination.teamId, false)
+      : destination;
+    const existing = existingAttachmentUrls(task);
     for (const attachment of attachments) {
       const resolvedPath = pyResolve(attachment.path);
-      if (!uploaded.has(resolvedPath)) {
+      if (uploaded.has(resolvedPath) || reused.has(resolvedPath)) continue;
+      const existingUrl = existing.get(attachmentKey(path.basename(resolvedPath), fs.statSync(resolvedPath).size));
+      if (existingUrl) {
+        reused.set(resolvedPath, existingUrl);
+      } else {
         uploaded.set(resolvedPath, await uploadTaskAttachment(uploadDestination, resolvedPath, apiToken));
       }
     }
-    content = rewriteLocalAttachmentReferences(content, markdownDir, uploaded);
+    content = rewriteLocalAttachmentReferences(content, markdownDir, new Map([...reused, ...uploaded]));
   }
 
   let normalizedLinks = 0;
@@ -359,7 +504,17 @@ export async function prepareMarkdownTaskContent(
     [content, normalizedLinks] = await linkifyBareUrls(content, createLinkContext(apiToken));
   }
 
-  return { content, attachments, uploadedAttachments: uploaded, title, outcome, normalizedLinks };
+  return {
+    content,
+    attachments,
+    uploadedAttachments: uploaded,
+    reusedAttachments: reused,
+    title,
+    outcome,
+    fields,
+    fieldSources,
+    normalizedLinks,
+  };
 }
 
 /** Find local Markdown file references to upload as task attachments. */
@@ -453,7 +608,8 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
   } else {
     info(io, `Target      : task=${destination.taskId}`);
   }
-  info(io, `Attachments : uploaded=${prepared.uploadedAttachments.size}`);
+  const reusedCount = prepared.reusedAttachments.size;
+  info(io, `Attachments : uploaded=${prepared.uploadedAttachments.size}${reusedCount ? `  reused=${reusedCount}` : ""}`);
   if (prepared.title) {
     info(io, `Title       : ${prepared.title}`);
   }
@@ -461,8 +617,15 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
     const ellipsis = pyLen(prepared.outcome) > 100 ? "..." : "";
     info(io, `Outcome     : ${pySlice(prepared.outcome, 0, 100)}${ellipsis}`);
   }
+  const fieldSummary = Object.entries(prepared.fieldSources).map(([key, value]) => `${key}=${value}`);
+  if (fieldSummary.length) {
+    info(io, `Fields      : ${fieldSummary.join("  ")}`);
+  }
   for (const [uploadedPath, url] of prepared.uploadedAttachments) {
     info(io, `Attachment  : ${path.basename(uploadedPath)} -> ${url}`);
+  }
+  for (const [reusedPath, url] of prepared.reusedAttachments) {
+    info(io, `Attachment  : ${path.basename(reusedPath)} -> ${url} (already attached)`);
   }
   if (!noRichLinks) {
     info(io, `Links       : normalized=${prepared.normalizedLinks}`);
@@ -470,7 +633,7 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
   print(io);
 
   try {
-    await updateTaskDescription(destination, prepared.content, apiToken, prepared.title);
+    await updateTaskDescription(destination, prepared.content, apiToken, prepared.title, prepared.fields);
   } catch (error) {
     if (error instanceof HttpError) return reportHttpError(error, io);
     if (error instanceof NetworkError) {

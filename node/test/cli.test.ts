@@ -89,6 +89,6 @@ describe("command-level argparse parity", () => {
   it("read_task_comment_limit_error_wins_over_extras", async () => {
     const io = new BufferedOutput();
     expect(await runReadTask(["--bogus", "--comment-limit", "0"], io)).toBe(2);
-    expect(io.err).toContain("argument --comment-limit: comment limit must be between 1 and 25");
+    expect(io.err).toContain("argument --comment-limit: comment limit must be between 1 and 100");
   });
 });

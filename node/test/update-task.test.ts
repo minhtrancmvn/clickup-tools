@@ -84,13 +84,17 @@ describe("ClickUpUpdateTaskTests", () => {
   it("prepare_markdown_uploads_each_unique_file_once_and_rewrites", async () => {
     const markdown = writeMarkdown("---\nclickup-task-id: abc123\n---\n" + "![flow](flow.gif)\n" + "[download](flow.gif)\n");
     fs.writeFileSync(path.join(path.dirname(markdown), "flow.gif"), "gif");
-    const calls = stubFetch(() => jsonResponse({ url: "https://attachments.example/flow.gif" }));
+    const calls = stubFetch((call) =>
+      call.method === "GET" ? jsonResponse({ id: "abc123", attachments: [] }) : jsonResponse({ url: "https://attachments.example/flow.gif" }),
+    );
 
     const prepared = await prepareMarkdownTaskContent(markdown, "pk_test", taskDestination("abc123"), { richLinks: false });
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.method).toBe("POST");
-    expect(calls[0]!.url).toBe("https://api.clickup.com/api/v2/task/abc123/attachment");
+    // One Get Task (existing attachments), then a single upload for the file referenced twice.
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      "GET https://api.clickup.com/api/v2/task/abc123",
+      "POST https://api.clickup.com/api/v2/task/abc123/attachment",
+    ]);
     expect(prepared.content).toContain("![flow](<https://attachments.example/flow.gif>)");
     expect(prepared.content).toContain("[download](<https://attachments.example/flow.gif>)");
   });
