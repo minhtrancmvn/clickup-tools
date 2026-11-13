@@ -76,12 +76,14 @@ describe("MCP protocol", () => {
 
     expect(Object.keys(byName).sort()).toEqual([
       "add_clickup_comment",
+      "edit_clickup_comment",
       "pull_clickup_page",
       "pull_clickup_task",
       "read_clickup_task",
       "update_clickup_page",
       "update_clickup_task",
     ]);
+    expect(byName.edit_clickup_comment!.inputSchema.required).toEqual(["comment_id"]);
     expect(byName.pull_clickup_page!.inputSchema.required).toEqual(["page_url"]);
     expect(byName.pull_clickup_task!.inputSchema.required ?? []).toEqual([]);
     expect(byName.update_clickup_page!.inputSchema.required).toEqual(["file_path"]);
@@ -133,6 +135,18 @@ describe("MCP protocol", () => {
       "https://api.clickup.com/api/v2/task/abc123/time",
       "https://api.clickup.com/api/v2/task/abc123/time_in_status",
     ]);
+    await client.close();
+  });
+
+  it("edit_clickup_comment_end_to_end_sends_put", async () => {
+    vi.stubEnv("CLICKUP_API_TOKEN", "pk_test");
+    const calls = stubFetch(() => jsonResponse({}));
+    const client = await connect();
+
+    const result = await client.callTool({ name: "edit_clickup_comment", arguments: { comment_id: "458", text: "Fixed in **v2**" } });
+
+    expect(textOf(result)).toMatch(/^Success\.\n[\s\S]*Comment 458 updated/);
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(["PUT https://api.clickup.com/api/v2/comment/458"]);
     await client.close();
   });
 

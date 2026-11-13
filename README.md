@@ -2,7 +2,7 @@
 
 Small command-line utilities for ClickUp workflows.
 
-> **This Python package is frozen at its current features.** New development happens in the TypeScript npm package [`@kaishj91/clickup-tools-mcp`](node/README.md), which needs no Python install (`npx -y @kaishj91/clickup-tools-mcp`). It has everything below plus Markdown task descriptions, comment paging and replies, task fields and subtitles from front matter, pull to Markdown, creating pages and tasks, checklist sync, posting comments, and ClickUp Chat.
+> **This Python package is frozen at its current features.** New development happens in the TypeScript npm package [`@kaishj91/clickup-tools-mcp`](node/README.md), which needs no Python install (`npx -y @kaishj91/clickup-tools-mcp`). It has everything below plus Markdown task descriptions, comment paging and replies, task fields and subtitles from front matter, pull to Markdown, creating pages and tasks, checklist sync, posting and editing comments, and ClickUp Chat.
 
 ## Install
 

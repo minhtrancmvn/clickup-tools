@@ -14,7 +14,7 @@ For the MCP server, set both as environment variables in your MCP client's serve
 
 ## MCP setup
 
-The server speaks MCP over stdio and exposes six tools: `update_clickup_page`, `update_clickup_task`, `read_clickup_task`, `pull_clickup_page`, `pull_clickup_task` and `add_clickup_comment`.
+The server speaks MCP over stdio and exposes seven tools: `update_clickup_page`, `update_clickup_task`, `read_clickup_task`, `pull_clickup_page`, `pull_clickup_task`, `add_clickup_comment` and `edit_clickup_comment`.
 
 ### Claude Code
 
@@ -90,6 +90,7 @@ The first `npx` start downloads the package. To start faster, install it globall
 | `pull_clickup_page` | `page_url` (required), `file_path` (omit to get the Markdown back), `overwrite` (default `false`) |
 | `pull_clickup_task` | `task_id` (falls back to `CLICKUP_TASK_ID`), `team_id`, `file_path` (omit to get the Markdown back), `overwrite` (default `false`) |
 | `add_clickup_comment` | `task_id`, `team_id`, `text` or `file_path` (Markdown), `notify_all` (default `false`) |
+| `edit_clickup_comment` | `comment_id` (required), `text` or `file_path` (Markdown) |
 
 Pass absolute Markdown paths to the update tools. `read_clickup_task` returns the same JSON document as `clickup-read-task --json`. Each tool returns text that starts with `Success.` or `Error (exit code N).` followed by the command output.
 
@@ -190,9 +191,12 @@ Posts Markdown as a task comment, converted to ClickUp's rich-text comment forma
 clickup-comment OOLE-523 --text 'Deployed to **staging**, see [the run](https://ci.example/1)'
 clickup-comment OOLE-523 --file update.md
 clickup-comment --file update.md      # task from the file's clickup-task-id
+clickup-comment --edit 90160123456789 --text 'Deployed to **production**'
 ```
 
 Supported: `**bold**`, `*italic*`, `` `code` ``, `[links](https://...)`, bulleted, numbered and `- [ ]` checklist items (indent to nest), and fenced code blocks. Headings are posted as bold lines; other Markdown is posted as plain text. The file's front matter is not posted. Text that starts with `-` needs the `--text=- item` form.
+
+`--edit COMMENT_ID` replaces the content of an existing comment or threaded reply instead of posting a new one; no task is needed. The ID is printed when a comment is posted, and `clickup-read-task --json --include-comments` returns it as each comment's `id` (add `--include-replies` for reply IDs).
 
 ### `clickup-send-chat`
 

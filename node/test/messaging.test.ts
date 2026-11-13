@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { BufferedOutput } from "../src/common.js";
 import { markdownToComment, parseInline, run as runComment } from "../src/comment.js";
-import { commentArgv } from "../src/mcp-server.js";
+import { commentArgv, editCommentArgv } from "../src/mcp-server.js";
 import { buildChatMessage, escapeChatMarkdown, listChannels, run as runChat } from "../src/send-chat.js";
 import { bodyJson, jsonResponse, stubFetch, tempDir } from "./helpers.js";
 
@@ -106,6 +106,87 @@ describe("clickup-comment", () => {
     expect(await runComment(["--text", "hi"], noTask)).toBe(1);
     expect(noTask.err).toContain("No task given.");
     expect(calls).toHaveLength(0);
+  });
+
+  it("edits_a_comment_with_rich_text_and_plain_fallback", async () => {
+    vi.stubEnv("CLICKUP_API_TOKEN", "pk_test");
+    const calls = stubFetch(() => jsonResponse({}));
+    const io = new BufferedOutput();
+
+    expect(await runComment(["--edit", "90160123", "--text", "Now on **prod**\n- one"], io)).toBe(0);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("PUT");
+    expect(calls[0]!.url).toBe("https://api.clickup.com/api/v2/comment/90160123");
+    expect(calls[0]!.headers).toMatchObject({ Authorization: "pk_test" });
+    expect(bodyJson(calls[0]!)).toEqual({
+      comment_text: "Now on prod\none",
+      comment: [
+        { text: "Now on ", attributes: {} },
+        { text: "prod", attributes: { bold: true } },
+        { text: "\n", attributes: {} },
+        { text: "one", attributes: {} },
+        { text: "\n", attributes: { list: { list: "bullet" } } },
+      ],
+    });
+    expect(io.out).toContain("Comment 90160123 updated");
+  });
+
+  it("edits_from_a_file_ignoring_its_task_front_matter", async () => {
+    vi.stubEnv("CLICKUP_API_TOKEN", "pk_test");
+    const file = path.join(tempDir(), "note.md");
+    fs.writeFileSync(file, "---\nclickup-task-id: OOLE-1\n---\nFixed\n");
+    const calls = stubFetch(() => jsonResponse({}));
+
+    expect(await runComment(["--edit", "77", "--file", file], new BufferedOutput())).toBe(0);
+
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(["PUT https://api.clickup.com/api/v2/comment/77"]);
+    expect(bodyJson(calls[0]!)).toMatchObject({ comment_text: "Fixed" });
+  });
+
+  it("edit_rejects_bad_ids_and_task_only_options", async () => {
+    vi.stubEnv("CLICKUP_API_TOKEN", "pk_test");
+    const calls = stubFetch(() => jsonResponse({}));
+
+    const badId = new BufferedOutput();
+    expect(await runComment(["--edit", "12/../../task/x", "--text", "hi"], badId)).toBe(1);
+    expect(badId.err).toContain("Invalid comment ID");
+
+    const emptyId = new BufferedOutput();
+    expect(await runComment(["--edit=", "--text", "hi"], emptyId)).toBe(1);
+    expect(emptyId.err).toContain("Invalid comment ID");
+
+    const withTask = new BufferedOutput();
+    expect(await runComment(["t1", "--edit", "5", "--text", "hi"], withTask)).toBe(2);
+    expect(withTask.err).toContain("argument TASK_OR_URL: not allowed with argument --edit");
+
+    const withNotify = new BufferedOutput();
+    expect(await runComment(["--edit", "5", "--text", "hi", "--notify-all"], withNotify)).toBe(2);
+    expect(withNotify.err).toContain("argument --notify-all: not allowed with argument --edit");
+
+    const empty = new BufferedOutput();
+    expect(await runComment(["--edit", "5", "--text", "  "], empty)).toBe(1);
+    expect(empty.err).toContain("The comment is empty.");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("edit_reports_http_errors", async () => {
+    vi.stubEnv("CLICKUP_API_TOKEN", "pk_test");
+    stubFetch(() => jsonResponse({ err: "Comment not found", ECODE: "COMMENT_001" }, 404));
+    const io = new BufferedOutput();
+
+    expect(await runComment(["--edit", "5", "--text", "hi"], io)).toBe(1);
+    expect(io.err).toContain("404");
+    expect(io.out).not.toContain("updated");
+  });
+
+  it("mcp_edit_argv_passes_id_and_dash_text", async () => {
+    expect(editCommentArgv({ comment_id: "5", text: "- item" })).toEqual(["--edit=5", "--text=- item"]);
+    expect(editCommentArgv({ comment_id: "5", file_path: "/a.md" })).toEqual(["--edit=5", "--file", "/a.md"]);
+    vi.stubEnv("CLICKUP_API_TOKEN", "pk_test");
+    const calls = stubFetch(() => jsonResponse({}));
+    expect(await runComment(editCommentArgv({ comment_id: "5", text: "- item" }), new BufferedOutput())).toBe(0);
+    expect(bodyJson(calls[0]!)).toMatchObject({ comment_text: "item", comment: [{ text: "item" }, { text: "\n", attributes: { list: { list: "bullet" } } }] });
   });
 
   it("mcp_argv_passes_text_that_starts_with_a_dash", async () => {

@@ -151,15 +151,42 @@ export async function createTaskComment(
   return isDict(created) && created.id !== undefined && created.id !== null ? String(created.id) : "";
 }
 
+/** Plain-text form of comment runs. */
+export function commentPlainText(comment: CommentBlock[]): string {
+  return comment.map((block) => block.text).join("").replace(/\s+$/, "");
+}
+
+/**
+ * Replace the content of an existing comment or reply. ClickUp documents only
+ * comment_text for this endpoint, so the plain text is sent alongside the
+ * rich-text runs.
+ */
+export async function updateComment(commentId: string, comment: CommentBlock[], apiToken: string): Promise<void> {
+  await httpRequest(`https://api.clickup.com/api/v2/comment/${commentId}`, {
+    method: "PUT",
+    headers: { Authorization: apiToken, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ comment_text: commentPlainText(comment), comment }),
+  });
+}
+
+/** ClickUp comment IDs are numeric; anything else would change the request path. */
+export function parseCommentId(value: string): string {
+  const commentId = value.trim();
+  if (!/^\d+$/.test(commentId)) throw new ValueError(`Invalid comment ID: ${JSON.stringify(value)} (expected digits only).`);
+  return commentId;
+}
+
 export const PROG = "clickup-comment";
 
-const USAGE = "usage: clickup-comment [-h] [--file FILE | --text TEXT] [--team-id ID] [--notify-all] [TASK_OR_URL]\n";
+const USAGE =
+  "usage: clickup-comment [-h] [--file FILE | --text TEXT] [--team-id ID] [--notify-all] [--edit COMMENT_ID] [TASK_OR_URL]\n";
 
 export const CLI: CliSpec = {
   prog: PROG,
   usage: USAGE,
   help: `${USAGE}
-Post Markdown as a comment on a ClickUp task.
+Post Markdown as a comment on a ClickUp task, or replace an existing
+comment's content with --edit.
 
 positional arguments:
   TASK_OR_URL           ClickUp task ID, custom task ID, or task URL (defaults
@@ -172,15 +199,21 @@ options:
   --team-id ID          ClickUp team/workspace ID for custom task IDs
   --notify-all          Also notify yourself (assignees and watchers are
                         always notified)
+  --edit COMMENT_ID     Replace the content of this comment or reply instead
+                        of posting a new one (no task needed)
 
 Supported formatting: **bold**, *italic*, \`code\`, [links](https://...),
 bulleted, numbered and - [ ] checklist items (indent to nest), and code
 blocks. Headings are posted as bold lines.
 
+Comment IDs are printed when a comment is posted, and returned as "id" by
+clickup-read-task --json --include-comments.
+
 examples:
   clickup-comment OOLE-523 --text 'Deployed to **staging**, see [run](https://ci/1)'
   clickup-comment OOLE-523 --file update.md
   clickup-comment --file update.md     # task from the file's clickup-task-id
+  clickup-comment --edit 90160123456789 --text 'Deployed to **production**'
 `,
   maxPositionals: 1,
   options: {
@@ -189,16 +222,23 @@ examples:
     text: { type: "string" },
     "team-id": { type: "string" },
     "notify-all": { type: "boolean" },
+    edit: { type: "string" },
   },
 };
 
 /** Run the CLI and return a process exit code. */
 export async function run(argv: readonly string[], io: Output = processOutput): Promise<number> {
   const parsed = parseCli(CLI, argv, io, {
-    validate: (candidate) =>
-      candidate.values.file !== undefined && candidate.values.text !== undefined
-        ? `argument --text: not allowed with argument --file`
-        : null,
+    validate: (candidate) => {
+      if (candidate.values.file !== undefined && candidate.values.text !== undefined) {
+        return `argument --text: not allowed with argument --file`;
+      }
+      if (candidate.values.edit !== undefined) {
+        if (candidate.positionals.length) return `argument TASK_OR_URL: not allowed with argument --edit`;
+        if (candidate.values["notify-all"] !== undefined) return `argument --notify-all: not allowed with argument --edit`;
+      }
+      return null;
+    },
   });
   if (typeof parsed === "number") return parsed;
 
@@ -226,6 +266,15 @@ export async function run(argv: readonly string[], io: Output = processOutput): 
       fileTeam = (metadata["clickup-team-id"] ?? "").trim();
     }
     if (!markdown.trim()) throw new ValueError("The comment is empty.");
+
+    const editId = parsed.values.edit;
+    if (typeof editId === "string") {
+      const commentId = parseCommentId(editId);
+      info(io, `Target : comment=${commentId}`);
+      await updateComment(commentId, markdownToComment(markdown), apiToken);
+      ok(io, `Comment ${commentId} updated`);
+      return 0;
+    }
 
     const taskValue = parsed.positionals[0] || fileTask || getEnvValue("CLICKUP_TASK_ID").trim();
     if (!taskValue) throw new ValueError("No task given. Pass TASK_OR_URL or add clickup-task-id to the file's front matter.");

@@ -57,6 +57,21 @@ export function commentArgv({
   return argv;
 }
 
+export function editCommentArgv({
+  comment_id,
+  text = "",
+  file_path = "",
+}: {
+  comment_id: string;
+  text?: string;
+  file_path?: string;
+}): string[] {
+  const argv = [`--edit=${comment_id}`];
+  if (file_path) argv.push("--file", file_path);
+  if (text) argv.push(`--text=${text}`);
+  return argv;
+}
+
 export function pullPageArgv({ page_url, file_path = "", overwrite = false }: { page_url: string; file_path?: string; overwrite?: boolean }): string[] {
   const argv = [page_url];
   if (file_path) argv.push("--output", file_path);
@@ -192,6 +207,10 @@ const ADD_COMMENT_DESCRIPTION = `Post Markdown as a comment on a ClickUp task.
 
 Pass the Markdown as text, or file_path for a Markdown file (its front matter is not posted, and its clickup-task-id is used when task_id is omitted). The Markdown is converted to ClickUp's rich-text comment format: **bold**, *italic*, \`code\`, [links](https://...), bulleted, numbered and "- [ ]" checklist items (indent to nest), and fenced code blocks; headings are posted as bold lines.`;
 
+const EDIT_COMMENT_DESCRIPTION = `Replace the content of an existing ClickUp task comment or threaded reply with Markdown.
+
+comment_id is the numeric ID that add_clickup_comment reports when posting, or the "id" of a comment or reply returned by read_clickup_task with include_comments=true (include_replies=true for replies). Pass the new Markdown as text, or file_path for a Markdown file (its front matter is not posted). The whole comment is replaced, using the same formatting as add_clickup_comment.`;
+
 const PULL_PAGE_DESCRIPTION =`Save a ClickUp Doc page as Markdown that update_clickup_page can push back.
 
 The result starts with clickup-page front matter (and subtitle when the page has one), then the page name as a # heading, then the page content. With file_path, the Markdown is written to that file (refused if it exists unless overwrite=true) and the tool reports the path; without file_path, the Markdown is returned. Edit the file and call update_clickup_page with it to push changes.`;
@@ -315,6 +334,20 @@ export function createServer(overrides: Partial<ToolRunners> = {}): McpServer {
       },
     },
     async (args) => callRunner(runners.comment, commentArgv(args)),
+  );
+
+  server.registerTool(
+    "edit_clickup_comment",
+    {
+      description: EDIT_COMMENT_DESCRIPTION,
+      inputSchema: {
+        comment_id: z.string().describe("Numeric ID of the comment or reply to edit."),
+        text: z.string().default("").describe("New Markdown content. Use either text or file_path."),
+        file_path: z.string().default("").describe("Markdown file with the new content (front matter is not posted). Use either text or file_path."),
+      },
+      annotations: { destructiveHint: true, idempotentHint: true },
+    },
+    async (args) => callRunner(runners.comment, editCommentArgv(args)),
   );
 
   return server;
