@@ -284,13 +284,15 @@ npm run build
 
 Pull requests that touch `node/` run typecheck, tests and build on Node 20, 22 and 24 in GitHub Actions.
 
-To release, bump the version and merge to `main`:
+Merging to `main` releases automatically. The workflow reads the [Conventional Commits](https://www.conventionalcommits.org/) that touched `node/` since the last version change: a `type!:` subject or a `BREAKING CHANGE:` footer bumps the major version, `feat` the minor, and `fix` or `perf` the patch. It commits the bump to `main` as `chore(release): ...` and publishes to npm. Merges with only `docs`, `chore`, `test`, `ci` or `refactor` commits skip the release.
+
+To choose the version yourself, bump it in the merge; a version that is not on npm yet is published as is:
 
 ```sh
 npm version patch --no-git-tag-version   # or minor / major
 ```
 
-The workflow publishes to npm when the version in `package.json` is not on the registry yet; merges without a version bump skip publishing. Publishing uses npm trusted publishing, so no npm token is stored in GitHub.
+Publishing uses npm trusted publishing, so no npm token is stored in GitHub.
 
 ## License
 

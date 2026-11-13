@@ -1,9 +1,19 @@
 # CI and release for the npm package in node/.
 #
 # - Pull requests: typecheck, test and build on every supported Node major.
-# - Push to main (a merge): the same checks, then publish to npm when the
-#   version in node/package.json is not on the registry yet. Merges that do
-#   not bump the version run the checks and skip publishing.
+# - Push to main (a merge): the same checks, then release to npm.
+#   - If the version in node/package.json is not on the registry yet (a manual
+#     bump), it is published as is.
+#   - Otherwise the version is bumped from the Conventional Commits under
+#     node/ since the last version change (scripts/release-level.sh):
+#     breaking -> major, feat -> minor, fix/perf -> patch. The bump is
+#     committed to main as "chore(release): ..." and then published. Merges
+#     with only docs/chore/test/ci/refactor commits skip the release.
+#
+# The bump commit is pushed with GITHUB_TOKEN, which does not trigger another
+# workflow run. If main moved on while this run was going, the push is
+# rejected and nothing is published; the run for the newer push releases
+# everything since the last version change instead.
 #
 # Publishing uses npm trusted publishing (OIDC): no npm token is stored in
 # GitHub. The npm package's trusted publisher must point at this repository
@@ -64,30 +74,57 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write # push the version bump commit to main
       id-token: write # OIDC token for npm trusted publishing
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history to find the last version change
       - uses: actions/setup-node@v7
         with:
           # Trusted publishing needs Node 22.14+ and npm 11.5.1+.
           node-version: 24
           cache: npm
           cache-dependency-path: node/package-lock.json
-      - name: Check whether this version is already on npm
+      - name: Decide the release
         id: version
         run: |
           npm --version
           spec="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
-          if npm view "$spec" version --prefer-online > /dev/null 2>&1; then
+          if ! npm view "$spec" version --prefer-online > /dev/null 2>&1; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$spec is not on npm yet; publishing it as is"
+            exit 0
+          fi
+          base="$(git log -1 --format=%H -G'"version":' -- package.json)"
+          if [ -z "$base" ]; then
+            echo "::error::Could not find the commit that last changed the version in node/package.json."
+            exit 1
+          fi
+          level="$(bash scripts/release-level.sh "$base")"
+          if [ "$level" = none ]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::$spec is already on npm; bump node/package.json version to release."
+            echo "::notice::No feat, fix, perf or breaking commits under node/ since $spec; skipping the release."
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Publishing $spec"
+            echo "bump=$level" >> "$GITHUB_OUTPUT"
+            echo "::notice::$spec is on npm; releasing a $level bump from the commits since ${base:0:7}"
           fi
       - if: steps.version.outputs.publish == 'true'
         run: npm ci
+      - name: Bump the version and push it to main
+        if: steps.version.outputs.bump != ''
+        env:
+          BUMP: ${{ steps.version.outputs.bump }}
+        run: |
+          npm version "$BUMP" --no-git-tag-version
+          spec="$(node -p "const p = require('./package.json'); p.name + ' ' + p.version")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(release): $spec"
+          git push origin HEAD:main
+          echo "::notice::Committed chore(release): $spec"
       # prepublishOnly re-runs typecheck, tests and build before upload.
       - if: steps.version.outputs.publish == 'true'
         run: npm publish
